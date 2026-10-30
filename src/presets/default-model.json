@@ -1,0 +1,169 @@
+{
+  "nombre": "IaConia Base Assistant",
+  "descripcion": "Modelo NLU preentrenado de fábrica para conversación, comandos y asistencia inteligente.",
+  "esquemaSlots": {
+    "empresa": {
+      "tipo": "constante",
+      "valor": "IaConia AI"
+    },
+    "email": {
+      "tipo": "regex",
+      "regex": "[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+",
+      "pregunta": "¿Podrías indicarme tu correo electrónico para ponernos en contacto?",
+      "error": "El correo ingresado no parece válido. Por favor ingresa un formato como usuario@ejemplo.com:"
+    },
+    "telefono": {
+      "tipo": "regex",
+      "regex": "\\b\\d{7,10}\\b",
+      "pregunta": "¿Cuál es tu número de teléfono de contacto?",
+      "error": "El número de teléfono debe contener entre 7 y 10 dígitos. Por favor ingresa un número válido:"
+    },
+    "departamento": {
+      "tipo": "catalogo",
+      "opciones": ["ventas", "soporte", "facturacion", "tecnico", "atencion a clientes"],
+      "umbral": 70,
+      "pregunta": "¿Con qué departamento deseas comunicarte? (ventas, soporte o facturación)",
+      "error": "Disculpa, no reconocemos ese departamento. Por favor elige entre: ventas, soporte o facturación:"
+    }
+  },
+  "baseConocimiento": [
+    {
+      "intension": "saludo",
+      "expresiones": [
+        "hola",
+        "hola que tal",
+        "buenas",
+        "buenos dias",
+        "buenas tardes",
+        "buenas noches",
+        "hey",
+        "holi",
+        "saludos",
+        "hola asistente",
+        "que onda"
+      ],
+      "respuestas": [
+        "¡Hola! 👋 Bienvenido a {slot.empresa}. ¿En qué te puedo colaborar hoy?",
+        "¡Buen día! Un gusto saludarte. ¿Cómo te puedo asistir?",
+        "¡Hola! Estoy listo para ayudarte con lo que necesites."
+      ],
+      "sugerencias": ["¿Qué puedes hacer?", "Contactar con soporte", "Ver estado del servicio"]
+    },
+    {
+      "intension": "despedida",
+      "expresiones": [
+        "adios",
+        "chau",
+        "hasta luego",
+        "nos vemos",
+        "bye",
+        "hasta pronto",
+        "eso seria todo gracias",
+        "me retiro",
+        "terminar conversacion"
+      ],
+      "respuestas": [
+        "¡Hasta luego! Ha sido un placer atenderte. Que tengas un excelente día. 👋",
+        "¡Hasta pronto! Recuerda que aquí estaré si necesitas algo más.",
+        "¡Nos vemos! Gracias por comunicarte con {slot.empresa}."
+      ]
+    },
+    {
+      "intension": "agradecimiento",
+      "expresiones": [
+        "gracias",
+        "muchas gracias",
+        "te lo agradezco",
+        "mil gracias",
+        "excelente gracias",
+        "muy amable",
+        "gracias por la ayuda"
+      ],
+      "respuestas": [
+        "¡Con todo gusto! ¿Hay algo más en lo que te pueda ayudar?",
+        "¡Para servirte! Un placer apoyarte.",
+        "¡A la orden siempre! 😊"
+      ]
+    },
+    {
+      "intension": "ayuda",
+      "expresiones": [
+        "ayuda",
+        "que puedes hacer",
+        "cuales son tus funciones",
+        "como funciona esto",
+        "que sabes hacer",
+        "menu de opciones",
+        "necesito ayuda",
+        "comandos disponibles"
+      ],
+      "respuestas": [
+        "🤖 Soy el motor conversacional de {slot.empresa}. Puedo clasificar intenciones, extraer parámetros en tiempo real, conectarme a bases de datos y responder con ultrabaja latencia en tu navegador.",
+        "Puedo orientarte con consultas, redirigirte a soporte, validar tus datos de contacto o ejecutar acciones personalizadas."
+      ],
+      "sugerencias": ["Verificar estado", "Contactar a soporte", "Consultar departamento"]
+    },
+    {
+      "intension": "consultar_estado",
+      "expresiones": [
+        "cual es tu estado",
+        "estas activo",
+        "funciona el bot",
+        "prueba de conexion",
+        "estado del sistema",
+        "estas ahi",
+        "ping",
+        "test"
+      ],
+      "respuestas": [
+        "⚡ Motor de IA 100% activo y procesando en memoria RAM del navegador. Latencia estimada: < 2ms.",
+        "✅ Todos los sistemas están operando con normalidad en modo Client-Side."
+      ]
+    },
+    {
+      "intension": "contactar_soporte",
+      "expresiones": [
+        "quiero hablar con soporte",
+        "necesito soporte tecnico",
+        "comunicame con un asesor",
+        "soporte",
+        "ayuda tecnica",
+        "hablar con un humano"
+      ],
+      "slots": ["departamento"],
+      "respuestas": [
+        "Perfecto, he registrado tu solicitud para el departamento de **{slot.departamento}**. Un especialista se comunicará pronto.",
+        "Transferencia iniciada al área de **{slot.departamento}**. En breve te atenderemos."
+      ],
+      "action": "TRANSFERIR_SOPORTE"
+    }
+  ],
+  "baseDatos": [
+    {
+      "id": 1,
+      "titulo": "Soporte Técnico Especializado",
+      "descripcion": "Atención para incidentes de infraestructura, servidores y conectividad.",
+      "categoria": "soporte"
+    },
+    {
+      "id": 2,
+      "titulo": "Facturación y Cobranza",
+      "descripcion": "Consultas sobre recibos, pagos con tarjeta, reembolsos y estados de cuenta.",
+      "categoria": "facturacion"
+    },
+    {
+      "id": 3,
+      "titulo": "Ventas y Planes Corporativos",
+      "descripcion": "Cotizaciones para empresas, planes mensuales y demostraciones de producto.",
+      "categoria": "ventas"
+    }
+  ],
+  "mensajesPorDefecto": {
+    "noEntendido": "Disculpa, no logré comprender tu mensaje. ¿Podrías reformularlo de otra manera?",
+    "solicitarSlot": "Por favor, indícame el valor para {slot}.",
+    "intencionProcesada": "He procesado tu solicitud de **{intencion}**."
+  },
+  "camposIgnoradosDb": ["id", "_id", "fecha_creacion", "created_at"],
+  "conectoresTexto": ["y", "e", "o", "u", "de", "del", "en", "con", "para", "por", "a"]
+}
+

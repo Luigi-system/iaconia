@@ -1,0 +1,45 @@
+{
+  "name": "iaconia",
+  "version": "1.0.4",
+  "description": "Motor de Inteligencia Artificial Conversacional (NLU) ultraligero y en memoria para frontend y Node.js",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "ai",
+    "nlu",
+    "nlp",
+    "chatbot",
+    "conversational-ai",
+    "client-side-ai",
+    "browser-ai",
+    "tfidf",
+    "logistic-regression",
+    "iaconia"
+  ],
+  "author": "IaConia AI Team",
+  "license": "MIT",
+  "devDependencies": {
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.2"
+  },
+  "dependencies": {
+    "iaconia": "^1.0.4"
+  }
+}
