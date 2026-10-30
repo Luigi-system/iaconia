@@ -1,0 +1,7 @@
+node_modules/
+dist/
+transcription*.json
+/ejemplos
+/demo
+test.js
+test1.js

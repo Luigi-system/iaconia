@@ -7,7 +7,7 @@ import {
 } from '../types.js';
 import { clasificarTexto, obtenerDistribucionProbabilidades, PipelineEntrenado } from './classifier.js';
 import { SesionUsuario } from './session.js';
-import { extraerTodosLosSlots, extraerVariable } from './slot-extractor.js';
+import { extraerTodosLosSlots, extraerVariable, resolverTipoSlot } from './slot-extractor.js';
 import { VectorDatabaseIndex } from './vector-db.js';
 
 export const MENSAJES_DEFAULT: Required<MensajesPorDefecto> = {
@@ -94,7 +94,8 @@ export async function resolverTurnoDialogo(
   umbralMl: number = 0.48,
   umbralFuzzy: number = 78,
   mensajesPorDefecto?: MensajesPorDefecto,
-  conectoresTexto?: string[]
+  conectoresTexto?: string[],
+  coberturaMinima: number = 0
 ): Promise<ResultadoInferencia> {
   const tInicio = performance.now();
   sesion.registrarMensajeUsuario(mensajeUsuario);
@@ -109,7 +110,15 @@ export async function resolverTurnoDialogo(
     const slotCfg = esquemaSlots[slotName];
 
     if (slotCfg) {
-      const valorExtraido = extraerVariable(mensajeUsuario, slotName, slotCfg, true, conectoresTexto);
+      // El texto libre captura casi todo, así que primero se descarta un cambio de tema
+      let esCambioDeTema = false;
+      if (resolverTipoSlot(slotCfg) === 'texto') {
+        const clasifPrevia = clasificarTexto(mensajeUsuario, pipeline, umbralMl, umbralFuzzy, coberturaMinima);
+        esCambioDeTema = !!clasifPrevia.intencion && clasifPrevia.intencion !== sesion.intencionPendiente;
+      }
+      const valorExtraido = esCambioDeTema
+        ? null
+        : extraerVariable(mensajeUsuario, slotName, slotCfg, true, conectoresTexto);
       if (valorExtraido !== null && valorExtraido !== undefined && String(valorExtraido).trim() !== '') {
         // [CAMINO A] Captura Exitosa: El usuario respondió el dato solicitado
         sesion.contexto[slotName] = String(valorExtraido).trim();
@@ -124,7 +133,7 @@ export async function resolverTurnoDialogo(
       } else {
         // [CAMINO B o C] El usuario no proporcionó el dato esperado.
         // Consultamos a la Red Neuronal para saber si hubo Cambio de Tema / Interrupción:
-        const clasifCambio = clasificarTexto(mensajeUsuario, pipeline, umbralMl, umbralFuzzy);
+        const clasifCambio = clasificarTexto(mensajeUsuario, pipeline, umbralMl, umbralFuzzy, coberturaMinima);
 
         if (clasifCambio.intencion && clasifCambio.intencion !== sesion.intencionPendiente) {
           // [CAMINO B] INTERRUPCIÓN / CONTEXT SWITCH (Estrategia B: Memoria Retenida)
@@ -165,14 +174,14 @@ export async function resolverTurnoDialogo(
 
   // 2. Si no se resolvió por slot pendiente (o si el usuario inició una nueva intención)
   if (!intencionDetectada) {
-    const resClasif = clasificarTexto(mensajeUsuario, pipeline, umbralMl, umbralFuzzy);
+    const resClasif = clasificarTexto(mensajeUsuario, pipeline, umbralMl, umbralFuzzy, coberturaMinima);
     intencionDetectada = resClasif.intencion;
     confianza = resClasif.confianza;
     metodo = resClasif.metodo;
   }
 
   // Extraer todos los slots nuevos presentes en el mensaje
-  const slotsNuevos = extraerTodosLosSlots(mensajeUsuario, esquemaSlots, conectoresTexto);
+  const slotsNuevos = extraerTodosLosSlots(mensajeUsuario, esquemaSlots, conectoresTexto, true);
   for (const [k, v] of Object.entries(slotsNuevos)) {
     sesion.contexto[k] = v;
     sesion.contexto[`slot.${k}`] = v;

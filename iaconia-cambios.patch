@@ -1,0 +1,1089 @@
+From c5131afc9e65abdb172d4d890bf2709502478cc3 Mon Sep 17 00:00:00 2001
+From: Benjamin Zagastizabal <bzagastizabal@wimprove.com>
+Date: Fri, 30 Oct 2026 13:43:30 -0500
+Subject: [PATCH] Rechazar mensajes fuera de dominio y corregir slots y export
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Agrega coberturaMinima y ejemplosFueraDominio al clasificador.
+- Evita que una palabra idéntica valga 100% en la fase difusa.
+- Captura slots de texto solo cuando se piden y permite cambiar de tema.
+- Guarda los pesos en exportModel y conserva los flags de regex.
+- Corrige la documentación sobre búsqueda y rendimiento.
+- Agrega pruebas de regresión.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .gitignore                   |   3 +
+ DOCUMENTACION.md             |  34 ++++----
+ DOCUMENTACION_IACONIA.md     |  28 +++---
+ DOCUMENTACION_TECNICA_NLU.md |  26 +++---
+ README.md                    |  42 ++++-----
+ package.json                 |   3 +-
+ src/core/classifier.ts       | 161 ++++++++++++++++++++++++++++++++---
+ src/core/dialog-manager.ts   |  21 +++--
+ src/core/slot-extractor.ts   |   6 +-
+ src/index.ts                 |  62 +++++++++++---
+ src/types.ts                 |  14 +++
+ test/regresion.test.mjs      |  77 +++++++++++++++++
+ 12 files changed, 390 insertions(+), 87 deletions(-)
+ create mode 100644 .gitignore
+ create mode 100644 test/regresion.test.mjs
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..c7184eb
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,3 @@
++node_modules/
++dist/
++transcription*.json
+diff --git a/DOCUMENTACION.md b/DOCUMENTACION.md
+index f3596fc..e3d001a 100644
+--- a/DOCUMENTACION.md
++++ b/DOCUMENTACION.md
+@@ -51,7 +51,7 @@ Todos los métodos tienen nombres directos, limpios y consistentes en TypeScript
+ | **`bot.getNeurona(nombre)`**| Te da la información detallada de una neurona (sus expresiones y respuestas). | `bot.getNeurona("ayuda")` |
+ | **`bot.agregarNeurona(def)`**| Le enseña una nueva intención al bot con sus expresiones y respuestas. *(Alias: `addIntent()`)* | `bot.agregarNeurona({ intension: "...", expresiones: [...] })` |
+ | **`bot.actualizarNeurona(nombre, data)`**| Modifica las expresiones, respuestas o datos de una neurona existente. | `bot.actualizarNeurona("saludo", { respuestas: [...] })` |
+-| **`bot.eliminarNeurona(nombre)`**| Borra una neurona del bot y actualiza su red en 2 milisegundos. *(Alias: `removeIntent()`)* | `bot.eliminarNeurona("despedida")` |
++| **`bot.eliminarNeurona(nombre)`**| Borra una neurona del bot y la reentrena. *(Alias: `removeIntent()`)* | `bot.eliminarNeurona("despedida")` |
+ | **`bot.agregarFrase(neurona, frase)`**| Le enseña una nueva forma de hablar al bot para una neurona. | `bot.agregarFrase("saludo", "qué tal amigo")` |
+ | **`bot.eliminarFrase(neurona, frase)`**| Quita una frase de ejemplo de una neurona. | `bot.eliminarFrase("saludo", "buenos días")` |
+ | **`bot.addSlot(nombre, config)`**| Le enseña al bot a reconocer un dato importante (nombre, teléfono, catálogo). *(Alias: `agregarSlot()`)* | `bot.addSlot("telefono", { tipo: "regex", regex: /\d{10}/ })` |
+@@ -59,7 +59,7 @@ Todos los métodos tienen nombres directos, limpios y consistentes en TypeScript
+ | **`bot.getSlot(nombre)`** | Muestra cómo está configurado un dato en particular. | `bot.getSlot("telefono")` |
+ | **`bot.eliminarSlot(nombre)`** | Borra un dato de la configuración del bot. | `bot.eliminarSlot("telefono")` |
+ | **`bot.extraerSlots(texto)`** | Lee un texto y te devuelve los datos encontrados sin avanzar el chat. | `bot.extraerSlots("mi cel es 5512345678")` |
+-| **`bot.buscarBaseDatos(query, n?)`** | Búsqueda semántica vectorial por similitud coseno en la base de datos interna. | `bot.buscarBaseDatos("jamon con piña", 2)` |
++| **`bot.buscarBaseDatos(query, n?)`** | Búsqueda léxica vectorial (TF-IDF y similitud coseno) en la base de datos interna. | `bot.buscarBaseDatos("jamon con piña", 2)` |
+ | **`bot.cargarBaseDatos(lista)`** | Carga o reemplaza el catálogo/documentos e indexa los vectores en memoria. *(Alias: `loadDatabase()`)* | `bot.cargarBaseDatos([...])` |
+ | **`bot.agregarRegistro(doc)`** | Agrega un producto o documento a la base de datos vectorial en caliente. *(Alias: `addRecord()`)* | `bot.agregarRegistro({ nombre: "..." })` |
+ | **`bot.getBaseDatos()`** | Retorna todos los documentos indexados en la base de datos. *(Alias: `getDatabase()`)* | `bot.getBaseDatos()` |
+@@ -250,7 +250,7 @@ bot.addSlot("sabor_pizza", {
+ ---
+ 
+ ### 3️⃣ Tipo `texto` (Lenguaje abierto con lista `ignorar`)
+-Para capturar datos libres como nombres o direcciones. En lugar de complicarte con tres arrays distintos, tienes una sola lista limpia: **`ignorar`**:
++Para capturar datos libres como nombres o direcciones. Durante una conversación solo se captura cuando el bot pidió ese dato, para que otras frases no lo sobrescriban. En lugar de complicarte con tres arrays distintos, tienes una sola lista limpia: **`ignorar`**:
+ 
+ ```javascript
+ bot.addSlot("nombre_cliente", {
+@@ -404,14 +404,14 @@ bot.onAction("CONSULTAR_PEDIDO_API", async ({ slots }) => {
+ 
+ ---
+ 
+-## 🗄️ 5. Base de Datos Vectorial y RAG en Memoria (Búsqueda Semántica)
++## 🗄️ 5. Base de Datos Vectorial en Memoria (Búsqueda Léxica)
+ 
+-**IaConia** incluye un **motor RAG (Retrieval-Augmented Generation) vectorial ultraligero que corre 100% en la memoria RAM** de tu aplicación. 
++**IaConia** incluye un **motor de recuperación vectorial ultraligero que corre 100% en la memoria RAM** de tu aplicación. 
+ 
+ A diferencia de las bases de datos vectoriales tradicionales en la nube (como Pinecone, ChromaDB o Qdrant) que requieren conexión a internet y añaden cientos de milisegundos de latencia, el motor vectorial de IaConia:
+ * Convierte cualquier lista de objetos JSON a vectores matemáticos dispersos (**TF-IDF + Cosine Similarity**).
+-* Aplica **lematización morfológica en español** (entiende singulares, plurales, tildes y sinónimos).
+-* Responde búsquedas semánticas en **menos de 1 milisegundo**.
++* Aplica **lematización morfológica en español** (reduce plurales y elimina tildes; no reconoce sinónimos).
++* Compara palabras, no significado: la consulta debe compartir términos con el documento. No genera texto.
+ 
+ ---
+ 
+@@ -447,13 +447,13 @@ bot.cargarBaseDatos([
+ 
+ ---
+ 
+-### B. Búsqueda Semántica Directa (Por Significado)
++### B. Búsqueda Léxica Directa (Por Palabras)
+ 
+-Puedes consultar la base de datos vectorial directamente en tu código. El motor encontrará el registro adecuado **incluso si el usuario no dice el nombre exacto**:
++Puedes consultar la base de datos vectorial directamente en tu código. El motor encontrará el registro que comparta palabras con la consulta, **aunque el usuario no diga el nombre exacto**:
+ 
+ ```javascript
+-// El usuario nunca dijo "hawaiana", pero busca por ingredientes:
+-const resultados = bot.buscarBaseDatos("quiero algo con jamon y fruta", 1);
++// El usuario nunca dijo "hawaiana", pero menciona un ingrediente que aparece en el registro:
++const resultados = bot.buscarBaseDatos("quiero algo con jamon", 1);
+ 
+ console.log(resultados[0].nombre); // "Pizza Hawaiana Especial"
+ console.log(resultados[0].precio); // "$165 MXN"
+@@ -559,7 +559,7 @@ console.log(res);
+ Si configuraste neuronas, slots, umbrales o registros en la base de datos y deseas guardarlos en un archivo JSON o en tu base de datos (PostgreSQL, MongoDB, Redis, etc.):
+ 
+ ```javascript
+-// 1. Exportar todo a un objeto JSON serializable en camelCase (pesa apenas ~2 KB a 50 KB):
++// 1. Exportar todo a un objeto JSON serializable en camelCase (con 50 intenciones y 600 frases: ~27 KB sin pesos, ~850 KB con pesos; usa `exportModel({ incluirPesos: false })` para omitirlos):
+ const cerebro = bot.exportModel();
+ const jsonString = JSON.stringify(cerebro, null, 2);
+ 
+@@ -567,13 +567,14 @@ const jsonString = JSON.stringify(cerebro, null, 2);
+ // - nombre: Nombre del bot
+ // - baseConocimiento: Todas las neuronas, expresiones y respuestas
+ // - esquemaSlots: Slots declarados (con RegExp serializadas de forma segura)
+-// - baseDatos: Todos los documentos indexados en el motor vectorial RAG
++// - baseDatos: Todos los documentos indexados en el motor vectorial
++// - pesosEntrenados: Vocabulario y pesos para restaurar sin reentrenar
+ // - umbralClasificacion y umbralFuzzy: Valores de calibración matemática
+ 
+ // 2. En cualquier otro servidor, API o frontend (React/Vue), cargarlo al instante:
+ const nuevoBot = new IaConia();
+ nuevoBot.loadModel(JSON.parse(jsonString)); 
+-// ✅ Reentrena y reindexa en memoria RAM en < 2ms sin pérdida de datos
++// ✅ Restaura los pesos guardados y reindexa; solo reentrena si cambiaron las frases
+ ```
+ 
+ ---
+@@ -692,7 +693,7 @@ const bot = new IaConia({
+   },
+ 
+   // 2. Campos Ignorados en Base de Datos Vectorial
+-  // Evita que campos autoincrementales o códigos internos generen ruido en la búsqueda semántica
++  // Evita que campos autoincrementales o códigos internos generen ruido en la búsqueda
+   camposIgnoradosDb: ["id", "_id", "created_at", "internal_code"],
+ 
+   // 3. Conectores Gramaticales para Extracción de Texto Libre
+@@ -713,6 +714,9 @@ const bot = new IaConia({
+ | **`mensajesPorDefecto.intencionProcesada`** | `string` | `"He procesado tu solicitud de **{intencion}**."` | Respuesta emitida si una neurona no tiene `respuestas: []` definidas. |
+ | **`camposIgnoradosDb`** | `string[]` | `["id", "_id", "fecha_creacion", "created_at"]` | Claves JSON que el vectorizador omite para no indexar basura numérica. |
+ | **`conectoresTexto`** | `string[]` | `["y", "e", "o", "u", "de", "del", "en", "con", ...]` | Conectores gramaticales a recortar al final de campos de texto libre. |
++| **`ejemplosFueraDominio`** | `string[]` | `[]` | Frases que el bot debe rechazar, como negaciones o temas ajenos a tu negocio. |
++| **`coberturaMinima`** | `number` | `0.34` | Porción mínima de palabras con contenido que el modelo debe conocer. `0` desactiva el filtro. Valores altos rechazan más frases válidas; calíbralo con tus datos. |
++| **`palabrasVacias`** | `string[]` | Lista en español | Palabras excluidas del cálculo de cobertura. Reemplázala si tu bot usa otro idioma. |
+ 
+ > **💡 Portabilidad Total:** Todos estos campos se incluyen automáticamente al invocar `bot.exportModel()` y se restauran al llamar `bot.loadModel(json)`.
+ 
+diff --git a/DOCUMENTACION_IACONIA.md b/DOCUMENTACION_IACONIA.md
+index 6fc3701..b3c3d7c 100644
+--- a/DOCUMENTACION_IACONIA.md
++++ b/DOCUMENTACION_IACONIA.md
+@@ -1,6 +1,6 @@
+ # 📚 Guía Definitiva y Documentación de `iaconia`
+ 
+-> **IaConia** es un motor de Inteligencia Artificial Conversacional (NLU) ultraligero (< 45 KB), autónomo y determinista diseñado para ejecutarse **100% en el cliente (navegador web o Node.js)** con latencia sub-milisegundo (< 2 ms) y cero costos de servidor.
++> **IaConia** es un motor de Inteligencia Artificial Conversacional (NLU) ultraligero (< 45 KB), autónomo y determinista diseñado para ejecutarse **100% en el cliente (navegador web o Node.js)** con latencia normalmente menor a 2 ms en turnos cortos y cero costos de servidor.
+ 
+ ---
+ 
+@@ -26,7 +26,7 @@
+    - [Receta 1: Componente de Chat en React](#receta-1-componente-en-react)
+    - [Receta 2: Agendamiento de Citas con Slots Obligatorios](#receta-2-agendamiento-de-citas)
+    - [Receta 3: Conexión Segura con Backend Privado](#receta-3-conexión-con-backend-seguro)
+-   - [Receta 4: Búsqueda Semántica de Catálogo](#receta-4-búsqueda-semántica)
++   - [Receta 4: Búsqueda Léxica de Catálogo](#receta-4-búsqueda-léxica)
+ 7. [Buenas Prácticas y Calibración](#7-buenas-prácticas-y-calibración)
+ 
+ ---
+@@ -202,7 +202,7 @@ bot.onAction("CONSULTAR_SALDO_API", async ({ slots, sessionId }) => {
+ ---
+ 
+ ### 4.5. Base de Datos Vectorial
+-IaConia incluye una base de datos vectorial en memoria que indexa cualquier JSON arbitrario y realiza **búsqueda semántica** mediante TF-IDF, similitud coseno y lematización en español:
++IaConia incluye una base de datos vectorial en memoria que indexa cualquier JSON arbitrario y realiza **búsqueda léxica** mediante TF-IDF, similitud coseno y reducción de plurales en español. Compara palabras, no significado, y no reconoce sinónimos:
+ 
+ ```javascript
+ bot.baseDatos = [
+@@ -211,8 +211,8 @@ bot.baseDatos = [
+ ];
+ bot.indiceVectorial.indexar(bot.baseDatos);
+ 
+-// Búsqueda semántica instantánea
+-const resultados = bot.buscarBaseDatos("computadora para juegos potente");
++// Búsqueda por palabras compartidas con el registro
++const resultados = bot.buscarBaseDatos("laptop gamer potente");
+ console.log(resultados[0].producto); // "Laptop Gamer Pro"
+ ```
+ 
+@@ -229,9 +229,12 @@ const bot = new IaConia({
+   baseConocimiento?: IntencionDef[];  // Intenciones iniciales (Default: modelo preentrenado)
+   esquemaSlots?: EsquemaSlots;        // Configuración de slots iniciales
+   tokensBloqueo?: string[];           // Palabras o insultos bloqueados
+-  baseDatos?: any[];                  // Registros JSON para búsqueda semántica
++  baseDatos?: any[];                  // Registros JSON para búsqueda léxica
+   umbralClasificacion?: number;       // Umbral mínimo ML (Default: 0.45)
+   umbralFuzzy?: number;               // Umbral mínimo difuso (Default: 76)
++  ejemplosFueraDominio?: string[];    // Frases que el bot debe rechazar (Default: [])
++  coberturaMinima?: number;           // Porción mínima de palabras conocidas (Default: 0.34; 0 lo desactiva)
++  palabrasVacias?: string[];          // Palabras excluidas de la cobertura (Default: lista en español)
+ });
+ ```
+ 
+@@ -275,14 +278,14 @@ const probs = bot.obtenerProbabilidades("Hola");
+ Extrae todas las entidades y slots presentes en el texto según el esquema configurado.
+ 
+ #### `bot.buscarBaseDatos(query: string, limite?: number): any[]`
+-Ejecuta una búsqueda vectorial semántica con similitud coseno sobre la base de datos interna.
++Ejecuta una búsqueda vectorial léxica con similitud coseno sobre la base de datos interna.
+ 
+ ---
+ 
+ ### Métodos de Gestión y Entrenamiento
+ 
+ #### `bot.addIntent(intencionDef: IntencionDef): this`
+-Agrega o actualiza una intención en caliente y reentrena el modelo en memoria en < 5ms. Permite encadenamiento de métodos (*chaining*).
++Agrega o actualiza una intención en caliente y reentrena el modelo completo en memoria; con modelos grandes puede tardar cientos de milisegundos o más. Permite encadenamiento de métodos (*chaining*).
+ 
+ #### `bot.addSlot(nombreSlot: string, config: EsquemaSlot): this`
+ Registra un nuevo slot en el esquema de extracción.
+@@ -293,11 +296,11 @@ Registra un callback asíncrono para ejecutar lógica de negocio cuando una inte
+ #### `bot.entrenar(): this`
+ Fuerza un reentrenamiento completo del vocabulario TF-IDF y la regresión logística en memoria RAM.
+ 
+-#### `bot.exportModel(): Record<string, any>`
+-Exporta toda la base de conocimiento, slots, constantes y datos a un objeto JSON serializable.
++#### `bot.exportModel(opciones?: { incluirPesos?: boolean }): Record<string, any>`
++Exporta la base de conocimiento, slots, constantes, datos y pesos entrenados a un objeto JSON serializable. Con `incluirPesos: false` el archivo es más pequeño, pero la carga vuelve a entrenar.
+ 
+ #### `bot.loadModel(modelJson: Record<string, any>): this`
+-Carga un modelo completo desde un JSON arbitrario y lo entrena inmediatamente.
++Carga un modelo completo desde un JSON. Restaura los pesos guardados si las frases no cambiaron; de lo contrario, reentrena.
+ 
+ ---
+ 
+@@ -463,7 +466,8 @@ bot.onAction("CONSULTAR_API_PAQUETERIA", async ({ slots }) => {
+ 4. **Exportar a LocalStorage:** Puedes guardar el estado del bot en el navegador del usuario fácilmente:
+    ```javascript
+    // Guardar
+-   localStorage.setItem('mi_modelo_iaconia', JSON.stringify(bot.exportModel()));
++   // Sin pesos para no agotar la cuota de localStorage con modelos grandes
++   localStorage.setItem('mi_modelo_iaconia', JSON.stringify(bot.exportModel({ incluirPesos: false })));
+    
+    // Cargar en la siguiente visita
+    const guardado = localStorage.getItem('mi_modelo_iaconia');
+diff --git a/DOCUMENTACION_TECNICA_NLU.md b/DOCUMENTACION_TECNICA_NLU.md
+index e9d50d8..20d94dc 100644
+--- a/DOCUMENTACION_TECNICA_NLU.md
++++ b/DOCUMENTACION_TECNICA_NLU.md
+@@ -46,7 +46,7 @@ El motor **IaConia** es una implementación especializada de **Procesamiento de
+ A diferencia de las arquitecturas contemporáneas basadas en Modelos de Lenguaje Masivos (LLMs generativos como GPT-4, LLaMA o Claude) que operan como cajas negras estocásticas a través de APIs HTTP en la nube, IaConia resuelve el problema del lenguaje conversacional mediante un **enfoque determinista, híbrido (Machine Learning Lineal + Heurísticas Simbólicas) y de ultrabaja latencia**:
+ 
+ 1. **Cero Dependencia de Red y Hardware Acelerado:** No requiere GPU, ni WebGPU, ni llamadas remotas; corre en cualquier runtime de JavaScript (V8, JavaScriptCore, Hermes, Bun, Node.js) o Python con cero dependencias externas de compilación C++.
+-2. **Latencia Sub-milisegundo:** El tiempo promedio de inferencia, extracción de entidades y síntesis de respuesta oscila entre **0.18 ms y 1.4 ms** en CPU monohilo.
++2. **Baja Latencia en Turnos Cortos:** El tiempo promedio de inferencia, extracción de entidades y síntesis de respuesta suele quedar por debajo de **2 ms** en turnos cortos, en CPU monohilo. Los textos largos pueden tardar mucho más.
+ 3. **Determinismo y Gobernabilidad:** El comportamiento no "alucina". Una entrada idéntica bajo el mismo estado conversacional produce exactamente el mismo resultado predecible.
+ 4. **Huella de Memoria Ultraligera:** El binario empaquetado ocupa menos de **45 KB**, y un modelo con 50 intenciones y 500 frases consume menos de **1.8 MB de memoria RAM**.
+ 
+@@ -176,7 +176,7 @@ Donde:
+ 
+ ## 4. Algoritmo de Inferencia Jerárquica en 3 Fases
+ 
+-Cuando el usuario envía una frase, el clasificador ejecuta un pipeline jerárquico de decisión diseñado para optimizar tanto la precisión como el costo computacional:
++Cuando el usuario envía una frase, el clasificador ejecuta un pipeline jerárquico de decisión diseñado para optimizar tanto la precisión como el costo computacional. Cada fase exige además una cobertura mínima de vocabulario (`coberturaMinima`, por defecto `0.34`): las ventanas necesitan al menos 2 palabras conocidas y la fase difusa acepta palabras parecidas. Los `ejemplosFueraDominio` entrenan una clase de rechazo, pero las negaciones no se detectan solas: hay que incluirlas ahí.
+ 
+ ```mermaid
+ flowchart TD
+@@ -228,7 +228,7 @@ $$\mathcal{J}(\mathbf{W}, \mathbf{b}) = -\frac{1}{N} \sum_{i=1}^N \ln P(y^{(i)}
+ * Tasa de aprendizaje ($\eta$): $0.25$
+ * Épocas de entrenamiento: $250$
+ * Parámetro de penalización Ridge ($\lambda$): $0.0005$
+-* Tiempo total de entrenamiento en JS: **$3 \text{ ms} - 12 \text{ ms}$**.
++* Tiempo de entrenamiento en JS: depende del modelo; ver [Perfiles de Rendimiento](#perfiles-de-rendimiento-y-consumo-de-memoria).
+ 
+ #### Umbral de Decisión Dinámico
+ En lugar de un umbral fijo estático que falla cuando se agregan decenas de intenciones, el umbral de aceptación se recalibra dinámicamente según la cardinalidad del espacio de hipótesis:
+@@ -361,6 +361,8 @@ $$\text{ScoreFinal}(q, d_i) = \min\left(1.0, \; \cos(\mathbf{q}, \mathbf{d}_i) +
+ 
+ ### Fallback de Cobertura de Tokens para Vocabulario Fuera de Distribución (OOV)
+ 
++> **Limitación actual:** `esTokenCompatible` compara cada palabra con el documento completo, no con sus palabras. En la práctica, las palabras con errores o en plural suelen no encontrar resultados, salvo en documentos muy cortos.
++
+ Si el término de búsqueda no contiene palabras presentes en el vocabulario TF-IDF indexado ($\text{nnz} = 0$), el índice no falla en blanco. Activa automáticamente un **algoritmo de cobertura difusa por tokens**:
+ 
+ $$\text{ScoreOOV}(q, d_i) = \frac{1}{|T_q|} \sum_{t \in T_q} \mathbb{I}(t \in \text{doc}_i \lor \text{esTokenCompatible}(t, \text{doc}_i))$$
+@@ -442,13 +444,17 @@ Las respuestas admiten dos niveles de interpolación dinámica:
+ 
+ ### Perfiles de Rendimiento y Consumo de Memoria
+ 
+-Pruebas ejecutadas en hardware estándar de consumo (Intel Core i7 12th Gen / Apple M2, runtime Node.js v20 / V8):
++Mediciones de una sola corrida con modelos sintéticos (frases de 6 palabras), en 13th Gen Intel(R) Core(TM) i7-1355U y Node.js v22. Son orientativas: repítelas con tus datos y en el equipo donde correrá el motor.
++
++* **Entrenamiento (50 intenciones, 600 frases):** `410 ms – 580 ms`
++* **Entrenamiento (100 intenciones, 2,000 frases):** `3.2 s – 4.1 s`
++* **Entrenamiento (200 intenciones, 6,000 frases):** `22 s – 29 s`
++* **Restauración con pesos guardados (50 intenciones, 600 frases):** `5 ms`
++* **Tamaño de `exportModel()` (50 intenciones, 600 frases):** `~27 KB` sin pesos, `~850 KB` con pesos
++* **Paquete minificado:** `31 KB` (`10 KB` con gzip)
++* **Rechazo de un texto ajeno al vocabulario (50 intenciones):** `0.5 ms` con 10 palabras y `5 ms` con 1,000 palabras
+ 
+-* **Tiempo de Carga y Entrenamiento Inicial (50 intenciones, 600 frases):** `6.8 ms`
+-* **Latencia Promedio por Turno Conversacional (Inferencia + Slots):** `0.42 ms`
+-* **Latencia con Búsqueda Vectorial en Base Factual (1,000 registros):** `1.15 ms`
+-* **Tamaño del Modelo Exportado (`exportModel()` JSON):** `38 KB`
+-* **Consumo de Memoria Heap de V8:** `~1.4 MB`
++Los textos largos que sí usan el vocabulario del modelo son el peor caso, porque pasan por las ventanas y el motor difuso: con 50 intenciones, `1.7 s` con 200 palabras y `7.8 s` con 1,000. Clasifica turno por turno y no llamadas completas.
+ 
+ ---
+ 
+@@ -457,7 +463,7 @@ Pruebas ejecutadas en hardware estándar de consumo (Intel Core i7 12th Gen / Ap
+ | Dimensión Técnica | LLM Remoto (OpenAI GPT-4o / Claude) | Framework Local Clásico (Rasa NLU / Python) | **IaConia (Client-Side Edge NLU)** |
+ | :--- | :--- | :--- | :--- |
+ | **Lugar de Ejecución** | Nube (Servidores del proveedor) | Servidor dedicado (Python + PyTorch) | **Navegador del cliente / Node.js / App móvil** |
+-| **Latencia de Respuesta** | $600 \text{ ms} - 3,500 \text{ ms}$ | $45 \text{ ms} - 180 \text{ ms}$ | **$0.2 \text{ ms} - 1.5 \text{ ms}$** |
++| **Latencia de Respuesta** | $600 \text{ ms} - 3,500 \text{ ms}$ | $45 \text{ ms} - 180 \text{ ms}$ | **Normalmente $< 2 \text{ ms}$ en turnos cortos** |
+ | **Costo Operativo por Petición** | Variable por token (\$0.005 - \$0.03) | Costo de infraestructura fija (VMs, RAM) | **\$0.0000 (Ilimitado y gratuito)** |
+ | **Privacidad / Cumplimiento GDPR** | Datos del usuario cruzan internet | Depende del hosting propio | **100% On-Device (los datos no salen del equipo)** |
+ | **Operación Offline** | Imposible (requiere internet) | Imposible en clientes móviles sin servidor | **Completamente autónomo sin red** |
+diff --git a/README.md b/README.md
+index 5a81c62..722705c 100644
+--- a/README.md
++++ b/README.md
+@@ -5,7 +5,7 @@
+ [![TypeScript](https://img.shields.io/badge/TypeScript-Ready-blue.svg)](https://www.typescriptlang.org/)
+ [![Bundle Size](https://img.shields.io/bundlephobia/minzip/iaconia)](https://bundlephobia.com/package/iaconia)
+ 
+-> **IaConia** es un motor de **Inteligencia Artificial Conversacional (NLU)** y clasificación semántica ultraligero que funciona **100% en la memoria RAM** de tu aplicación. 
++> **IaConia** es un motor de **Inteligencia Artificial Conversacional (NLU)** y clasificación de intenciones ultraligero que funciona **100% en la memoria RAM** de tu aplicación. 
+ > 
+ > Responde en **menos de 2 milisegundos**, es 100% privado (no envía tus datos a servidores externos ni consume costos por token), no requiere GPUs y funciona tanto en **Node.js** como en navegadores web (**React, Vue, Vite, Next.js**) sin necesidad de conexión a internet.
+ 
+@@ -13,8 +13,8 @@
+ 
+ ## ⚡ Características Principales
+ 
+-- ⚡ **Latencia ultrabaja (< 2ms):** Inferencia instantánea en memoria RAM mediante álgebra lineal nativa.
+-- 📦 **Cero dependencias pesadas:** TF-IDF n-gramas + Regresión Logística Softmax + Distancia Levenshtein + Motor Vectorial RAG en TypeScript nativo.
++- ⚡ **Baja latencia en turnos cortos:** Inferencia en memoria RAM, normalmente por debajo de 2 ms. Los textos largos pueden tardar mucho más: clasifica turno por turno.
++- 📦 **Cero dependencias pesadas:** TF-IDF n-gramas + Regresión Logística Softmax + Distancia Levenshtein + Motor de Búsqueda Vectorial en TypeScript nativo.
+ - 🎯 **Preentrenado de fábrica:** Responde de inmediato saludos, soporte, despedidas y comandos sin necesidad de configuración previa.
+ - 🛡️ **Seguridad y Privacidad Absoluta:** Las intenciones y slots se procesan localmente en el dispositivo. Si requieres consultar APIs privadas o bases de datos externas, se delegan de forma segura mediante `onAction()`.
+ - 🔀 **Cambio de contexto en vivo:** Algoritmo de 3 vías con memoria retenida que no traba al usuario cuando cambia de tema.
+@@ -64,7 +64,7 @@ console.log(respuesta.latencyMs);     // 1.15ms
+ 3. [2. Extracción de Entidades y Variables (Slots)](#-2-las-4-formas-de-capturar-datos-los-slots)
+ 4. [3. Conversaciones Fluidas y Manejo de Errores](#-3-conversaciones-fluidas-y-manejo-de-errores)
+ 5. [4. Conectar a APIs Externas (`onAction`)](#-4-conectar-el-bot-a-apis-externas-onaction)
+-6. [5. Base de Datos Vectorial y RAG en Memoria (Búsqueda Semántica)](#-5-base-de-datos-vectorial-y-rag-en-memoria-búsqueda-semántica)
++6. [5. Base de Datos Vectorial en Memoria (Búsqueda Léxica)](#-5-base-de-datos-vectorial-en-memoria-búsqueda-léxica)
+ 7. [6. Objeto de Inferencia Enriquecido (`ResultadoInferencia`)](#-6-qué-información-te-devuelve-cada-mensaje)
+ 8. [7. Guardar y Cargar el Cerebro del Bot (`exportModel` y `loadModel`)](#-7-guardar-y-cargar-el-cerebro-del-bot-exportmodel-y-loadmodel)
+ 9. [8. Distribución de Probabilidades, Softmax y Detección de Ambigüedad](#-8-distribución-de-probabilidades-softmax-y-manejo-de-ambigüedad)
+@@ -87,7 +87,7 @@ Todos los métodos tienen nombres directos, limpios y consistentes en TypeScript
+ | **`bot.getNeurona(nombre)`**| Te da la información detallada de una neurona (sus expresiones y respuestas). | `bot.getNeurona("ayuda")` |
+ | **`bot.agregarNeurona(def)`**| Le enseña una nueva intención al bot con sus expresiones y respuestas. *(Alias: `addIntent()`)* | `bot.agregarNeurona({ intension: "...", expresiones: [...] })` |
+ | **`bot.actualizarNeurona(nombre, data)`**| Modifica las expresiones, respuestas o datos de una neurona existente. | `bot.actualizarNeurona("saludo", { respuestas: [...] })` |
+-| **`bot.eliminarNeurona(nombre)`**| Borra una neurona del bot y actualiza su red en 2 milisegundos. *(Alias: `removeIntent()`)* | `bot.eliminarNeurona("despedida")` |
++| **`bot.eliminarNeurona(nombre)`**| Borra una neurona del bot y la reentrena. *(Alias: `removeIntent()`)* | `bot.eliminarNeurona("despedida")` |
+ | **`bot.agregarFrase(neurona, frase)`**| Le enseña una nueva forma de hablar al bot para una neurona. | `bot.agregarFrase("saludo", "qué tal amigo")` |
+ | **`bot.eliminarFrase(neurona, frase)`**| Quita una frase de ejemplo de una neurona. | `bot.eliminarFrase("saludo", "buenos días")` |
+ | **`bot.addSlot(nombre, config)`**| Le enseña al bot a reconocer un dato importante (nombre, teléfono, catálogo). *(Alias: `agregarSlot()`)* | `bot.addSlot("telefono", { tipo: "regex", regex: /\d{10}/ })` |
+@@ -95,7 +95,7 @@ Todos los métodos tienen nombres directos, limpios y consistentes en TypeScript
+ | **`bot.getSlot(nombre)`** | Muestra cómo está configurado un dato en particular. | `bot.getSlot("telefono")` |
+ | **`bot.eliminarSlot(nombre)`** | Borra un dato de la configuración del bot. | `bot.eliminarSlot("telefono")` |
+ | **`bot.extraerSlots(texto)`** | Lee un texto y te devuelve los datos encontrados sin avanzar el chat. | `bot.extraerSlots("mi cel es 5512345678")` |
+-| **`bot.buscarBaseDatos(query, n?)`** | Búsqueda semántica vectorial por similitud coseno en la base de datos interna. | `bot.buscarBaseDatos("jamon con piña", 2)` |
++| **`bot.buscarBaseDatos(query, n?)`** | Búsqueda léxica vectorial (TF-IDF y similitud coseno) en la base de datos interna. | `bot.buscarBaseDatos("jamon con piña", 2)` |
+ | **`bot.cargarBaseDatos(lista)`** | Carga o reemplaza el catálogo/documentos e indexa los vectores en memoria. *(Alias: `loadDatabase()`)* | `bot.cargarBaseDatos([...])` |
+ | **`bot.agregarRegistro(doc)`** | Agrega un producto o documento a la base de datos vectorial en caliente. *(Alias: `addRecord()`)* | `bot.agregarRegistro({ nombre: "..." })` |
+ | **`bot.getBaseDatos()`** | Retorna todos los documentos indexados en la base de datos. *(Alias: `getDatabase()`)* | `bot.getBaseDatos()` |
+@@ -285,7 +285,7 @@ bot.addSlot("sabor_pizza", {
+ ---
+ 
+ ### 3️⃣ Tipo `texto` (Lenguaje abierto con lista `ignorar`)
+-Para capturar datos libres como nombres o direcciones. En lugar de complicarte con tres arrays distintos, tienes una sola lista limpia: **`ignorar`**:
++Para capturar datos libres como nombres o direcciones. Durante una conversación solo se captura cuando el bot pidió ese dato, para que otras frases no lo sobrescriban. En lugar de complicarte con tres arrays distintos, tienes una sola lista limpia: **`ignorar`**:
+ 
+ ```javascript
+ bot.addSlot("nombre_cliente", {
+@@ -439,14 +439,14 @@ bot.onAction("CONSULTAR_PEDIDO_API", async ({ slots }) => {
+ 
+ ---
+ 
+-## 🗄️ 5. Base de Datos Vectorial y RAG en Memoria (Búsqueda Semántica)
++## 🗄️ 5. Base de Datos Vectorial en Memoria (Búsqueda Léxica)
+ 
+-**IaConia** incluye un **motor RAG (Retrieval-Augmented Generation) vectorial ultraligero que corre 100% en la memoria RAM** de tu aplicación. 
++**IaConia** incluye un **motor de recuperación vectorial ultraligero que corre 100% en la memoria RAM** de tu aplicación. 
+ 
+ A diferencia de las bases de datos vectoriales tradicionales en la nube (como Pinecone, ChromaDB o Qdrant) que requieren conexión a internet y añaden cientos de milisegundos de latencia, el motor vectorial de IaConia:
+ * Convierte cualquier lista de objetos JSON a vectores matemáticos dispersos (**TF-IDF + Cosine Similarity**).
+-* Aplica **lematización morfológica en español** (entiende singulares, plurales, tildes y sinónimos).
+-* Responde búsquedas semánticas en **menos de 1 milisegundo**.
++* Aplica **lematización morfológica en español** (reduce plurales y elimina tildes; no reconoce sinónimos).
++* Compara palabras, no significado: la consulta debe compartir términos con el documento. No genera texto.
+ 
+ ---
+ 
+@@ -482,13 +482,13 @@ bot.cargarBaseDatos([
+ 
+ ---
+ 
+-### B. Búsqueda Semántica Directa (Por Significado)
++### B. Búsqueda Léxica Directa (Por Palabras)
+ 
+-Puedes consultar la base de datos vectorial directamente en tu código. El motor encontrará el registro adecuado **incluso si el usuario no dice el nombre exacto**:
++Puedes consultar la base de datos vectorial directamente en tu código. El motor encontrará el registro que comparta palabras con la consulta, **aunque el usuario no diga el nombre exacto**:
+ 
+ ```javascript
+-// El usuario nunca dijo "hawaiana", pero busca por ingredientes:
+-const resultados = bot.buscarBaseDatos("quiero algo con jamon y fruta", 1);
++// El usuario nunca dijo "hawaiana", pero menciona un ingrediente que aparece en el registro:
++const resultados = bot.buscarBaseDatos("quiero algo con jamon", 1);
+ 
+ console.log(resultados[0].nombre); // "Pizza Hawaiana Especial"
+ console.log(resultados[0].precio); // "$165 MXN"
+@@ -594,7 +594,7 @@ console.log(res);
+ Si configuraste neuronas, slots, umbrales o registros en la base de datos y deseas guardarlos en un archivo JSON o en tu base de datos (PostgreSQL, MongoDB, Redis, etc.):
+ 
+ ```javascript
+-// 1. Exportar todo a un objeto JSON serializable en camelCase (pesa apenas ~2 KB a 50 KB):
++// 1. Exportar todo a un objeto JSON serializable en camelCase (con 50 intenciones y 600 frases: ~27 KB sin pesos, ~850 KB con pesos; usa `exportModel({ incluirPesos: false })` para omitirlos):
+ const cerebro = bot.exportModel();
+ const jsonString = JSON.stringify(cerebro, null, 2);
+ 
+@@ -602,14 +602,15 @@ const jsonString = JSON.stringify(cerebro, null, 2);
+ // - nombre: Nombre del bot
+ // - baseConocimiento: Todas las neuronas, expresiones y respuestas
+ // - esquemaSlots: Slots declarados (con RegExp serializadas de forma segura)
+-// - baseDatos: Todos los documentos indexados en el motor vectorial RAG
++// - baseDatos: Todos los documentos indexados en el motor vectorial
++// - pesosEntrenados: Vocabulario y pesos para restaurar sin reentrenar
+ // - umbralClasificacion y umbralFuzzy: Valores de calibración matemática
+ // - mensajesPorDefecto, camposIgnoradosDb, conectoresTexto: Reglas dinámicas globales
+ 
+ // 2. En cualquier otro servidor, API o frontend (React/Vue), cargarlo al instante:
+ const nuevoBot = new IaConia();
+ nuevoBot.loadModel(JSON.parse(jsonString)); 
+-// ✅ Reentrena y reindexa en memoria RAM en < 2ms sin pérdida de datos
++// ✅ Restaura los pesos guardados y reindexa; solo reentrena si cambiaron las frases
+ ```
+ 
+ ---
+@@ -728,7 +729,7 @@ const bot = new IaConia({
+   },
+ 
+   // 2. Campos Ignorados en Base de Datos Vectorial
+-  // Evita que campos autoincrementales o códigos internos generen ruido en la búsqueda semántica
++  // Evita que campos autoincrementales o códigos internos generen ruido en la búsqueda
+   camposIgnoradosDb: ["id", "_id", "created_at", "internal_code"],
+ 
+   // 3. Conectores Gramaticales para Extracción de Texto Libre
+@@ -749,6 +750,9 @@ const bot = new IaConia({
+ | **`mensajesPorDefecto.intencionProcesada`** | `string` | `"He procesado tu solicitud de **{intencion}**."` | Respuesta emitida si una neurona no tiene `respuestas: []` definidas. |
+ | **`camposIgnoradosDb`** | `string[]` | `["id", "_id", "fecha_creacion", "created_at"]` | Claves JSON que el vectorizador omite para no indexar basura numérica. |
+ | **`conectoresTexto`** | `string[]` | `["y", "e", "o", "u", "de", "del", "en", "con", ...]` | Conectores gramaticales a recortar al final de campos de texto libre. |
++| **`ejemplosFueraDominio`** | `string[]` | `[]` | Frases que el bot debe rechazar, como negaciones o temas ajenos a tu negocio. |
++| **`coberturaMinima`** | `number` | `0.34` | Porción mínima de palabras con contenido que el modelo debe conocer. `0` desactiva el filtro. Valores altos rechazan más frases válidas; calíbralo con tus datos. |
++| **`palabrasVacias`** | `string[]` | Lista en español | Palabras excluidas del cálculo de cobertura. Reemplázala si tu bot usa otro idioma. |
+ 
+ > **💡 Portabilidad Total:** Todos estos campos se incluyen automáticamente al invocar `bot.exportModel()` y se restauran al llamar `bot.loadModel(json)`.
+ 
+diff --git a/package.json b/package.json
+index fa62fd3..a2b7a65 100644
+--- a/package.json
++++ b/package.json
+@@ -19,7 +19,8 @@
+   "scripts": {
+     "build": "tsup",
+     "dev": "tsup --watch",
+-    "typecheck": "tsc --noEmit"
++    "typecheck": "tsc --noEmit",
++    "test": "tsup && node --test test/regresion.test.mjs"
+   },
+   "keywords": [
+     "ai",
+diff --git a/src/core/classifier.ts b/src/core/classifier.ts
+index 9956bed..1672619 100644
+--- a/src/core/classifier.ts
++++ b/src/core/classifier.ts
+@@ -1,4 +1,4 @@
+-import { BaseConocimiento, EsquemaSlots, ProbabilidadIntencion } from '../types.js';
++import { BaseConocimiento, EsquemaSlots, PesosSerializados, ProbabilidadIntencion } from '../types.js';
+ 
+ // =====================================================================
+ // UTILIDADES DIFUSAS (CORRECTOR DE ERRORES ORTOGRÁFICOS Y LETRAS)
+@@ -346,6 +346,67 @@ export interface PipelineEntrenado {
+   clasificador: RegresionLogistica;
+   catalogoIntenciones: Record<string, any>;
+   frasesReferencia: Array<{ frase: string; intencion: string }>;
++  palabrasVacias: Set<string>;
++  unigramasLargos: string[];
++  tieneFueraDominio: boolean;
++  huella: string;
++}
++
++export interface OpcionesEntrenamiento {
++  ejemplosFueraDominio?: string[];
++  palabrasVacias?: string[];
++  pesosGuardados?: PesosSerializados;
++}
++
++export const COBERTURA_MINIMA_DEFAULT = 0.34;
++
++export const PALABRAS_VACIAS_DEFAULT: string[] = [
++  'a', 'al', 'ante', 'con', 'como', 'de', 'del', 'e', 'el', 'en', 'es', 'esa', 'ese', 'eso', 'esta', 'este', 'esto',
++  'la', 'las', 'le', 'les', 'lo', 'los', 'mas', 'me', 'mi', 'mis', 'muy', 'nos', 'o', 'para', 'por', 'que', 'se',
++  'su', 'sus', 'te', 'tu', 'tus', 'u', 'un', 'una', 'unas', 'unos', 'y', 'ya'
++];
++
++function calcularHuella(texto: string): string {
++  let h = 0x811c9dc5;
++  for (let i = 0; i < texto.length; i++) {
++    h ^= texto.charCodeAt(i);
++    h = Math.imul(h, 0x01000193);
++  }
++  return (h >>> 0).toString(16);
++}
++
++function floatABase64(valores: Float32Array): string {
++  const bytes = new Uint8Array(valores.buffer, valores.byteOffset, valores.byteLength);
++  let binario = '';
++  for (let i = 0; i < bytes.length; i += 0x8000) {
++    binario += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
++  }
++  return btoa(binario);
++}
++
++function base64AFloat(texto: string): Float32Array {
++  const binario = atob(texto);
++  const bytes = new Uint8Array(binario.length);
++  for (let i = 0; i < binario.length; i++) {
++    bytes[i] = binario.charCodeAt(i);
++  }
++  return new Float32Array(bytes.buffer);
++}
++
++/**
++ * 💾 Serializa el vocabulario y los pesos para restaurarlos sin volver a entrenar.
++ */
++export function serializarPesos(pipeline: PipelineEntrenado): PesosSerializados {
++  const { vectorizador, clasificador, huella } = pipeline;
++  return {
++    huella,
++    vocabulario: Array.from(vectorizador.vocabulario.keys()),
++    idf: floatABase64(vectorizador.idf),
++    totalDocs: vectorizador.totalDocs,
++    clases: clasificador.clases,
++    pesos: clasificador.pesos.map(floatABase64),
++    sesgos: floatABase64(clasificador.sesgos)
++  };
+ }
+ 
+ /**
+@@ -355,7 +416,8 @@ export interface PipelineEntrenado {
+  */
+ export function entrenarClasificador(
+   baseConocimiento: BaseConocimiento,
+-  esquemaSlots?: EsquemaSlots
++  esquemaSlots?: EsquemaSlots,
++  opciones?: OpcionesEntrenamiento
+ ): PipelineEntrenado {
+   const textos: string[] = [];
+   const etiquetas: string[] = [];
+@@ -404,6 +466,13 @@ export function entrenarClasificador(
+     throw new Error('La base de conocimiento no contiene frases de entrenamiento.');
+   }
+ 
++  // Los ejemplos negativos entrenan el rechazo, pero no participan como referencia difusa
++  const ejemplosFueraDominio = (opciones?.ejemplosFueraDominio || []).map(e => e.trim()).filter(Boolean);
++  for (const ejemplo of ejemplosFueraDominio) {
++    textos.push(ejemplo);
++    etiquetas.push('__desconocido__');
++  }
++
+   // Clase sintética si solo hay 1 intención registrada
+   const clasesUnicas = Array.from(new Set(etiquetas));
+   if (clasesUnicas.length === 1) {
+@@ -412,20 +481,75 @@ export function entrenarClasificador(
+     clasesUnicas.push('__desconocido__');
+   }
+ 
+-  const vectorizador = new VectorizadorTfidf().fit(textos);
+-  const muestras = textos.map(t => vectorizador.transform(t));
+-
++  const huella = calcularHuella(JSON.stringify([textos, etiquetas]));
++  const vectorizador = new VectorizadorTfidf();
+   const clasificador = new RegresionLogistica();
+-  clasificador.fit(muestras, etiquetas, vectorizador.vocabulario.size, clasesUnicas);
++  const guardados = opciones?.pesosGuardados;
++
++  // Solo se reutilizan pesos entrenados con exactamente las mismas frases
++  if (guardados && guardados.huella === huella) {
++    guardados.vocabulario.forEach((token, i) => vectorizador.vocabulario.set(token, i));
++    vectorizador.idf = base64AFloat(guardados.idf);
++    vectorizador.totalDocs = guardados.totalDocs;
++    clasificador.clases = guardados.clases;
++    clasificador.pesos = guardados.pesos.map(base64AFloat);
++    clasificador.sesgos = base64AFloat(guardados.sesgos);
++  } else {
++    vectorizador.fit(textos);
++    const muestras = textos.map(t => vectorizador.transform(t));
++    clasificador.fit(muestras, etiquetas, vectorizador.vocabulario.size, clasesUnicas);
++  }
+ 
+   return {
+     vectorizador,
+     clasificador,
+     catalogoIntenciones,
+-    frasesReferencia
++    frasesReferencia,
++    palabrasVacias: new Set(opciones?.palabrasVacias || PALABRAS_VACIAS_DEFAULT),
++    unigramasLargos: Array.from(vectorizador.vocabulario.keys()).filter(t => !t.includes(' ') && t.length >= 5),
++    tieneFueraDominio: ejemplosFueraDominio.length > 0,
++    huella
+   };
+ }
+ 
++/**
++ * 📏 Cobertura de vocabulario:
++ * Cuenta cuántas palabras con contenido del mensaje conoce el modelo.
++ * En modo tolerante también acepta palabras parecidas, para no castigar errores ortográficos.
++ */
++function medirCobertura(
++  texto: string,
++  pipeline: PipelineEntrenado,
++  tolerante: boolean = false
++): { conocidas: number; total: number } {
++  const palabras = texto
++    .normalize('NFD')
++    .replace(/[\u0300-\u036f]/g, '')
++    .toLowerCase()
++    .match(/[a-z0-9]+/g) || [];
++  const contenido = palabras.filter(p => !pipeline.palabrasVacias.has(p));
++  const parecidas: Map<string, boolean> = new Map();
++
++  let conocidas = 0;
++  for (const palabra of contenido) {
++    if (pipeline.vectorizador.vocabulario.has(palabra)) {
++      conocidas++;
++    } else if (tolerante && palabra.length >= 5) {
++      let parecida = parecidas.get(palabra);
++      if (parecida === undefined) {
++        parecida = pipeline.unigramasLargos.some(u => fuzzRatio(palabra, u) >= 82);
++        parecidas.set(palabra, parecida);
++      }
++      if (parecida) conocidas++;
++    }
++  }
++  return { conocidas, total: contenido.length };
++}
++
++function superaCobertura(cobertura: { conocidas: number; total: number }, minima: number): boolean {
++  return minima <= 0 || cobertura.total === 0 || cobertura.conocidas / cobertura.total >= minima;
++}
++
+ /**
+  * 🕵️‍♂️ El Juez y Detective de Intenciones:
+  * Decide qué quiso decir el usuario pasando el mensaje por 3 filtros de seguridad:
+@@ -438,7 +562,8 @@ export function clasificarTexto(
+   mensajeUsuario: string,
+   pipeline: PipelineEntrenado,
+   umbralMl: number = 0.48,
+-  umbralFuzzy: number = 78
++  umbralFuzzy: number = 78,
++  coberturaMinima: number = 0
+ ): { intencion: string | null; confianza: number; metodo: 'ml' | 'ml-ngram' | 'fuzzy' | 'ninguno' } {
+   if (!mensajeUsuario || !mensajeUsuario.trim()) {
+     return { intencion: null, confianza: 0, metodo: 'ninguno' };
+@@ -450,7 +575,7 @@ export function clasificarTexto(
+   // Fase 1: Inferencia directa ML completa
+   try {
+     const v = vectorizador.transform(textoLimpio);
+-    if (v.nnz > 0 && clasificador.clases.length > 0) {
++    if (v.nnz > 0 && clasificador.clases.length > 0 && superaCobertura(medirCobertura(textoLimpio, pipeline), coberturaMinima)) {
+       const probabilidades = clasificador.predictProba(v.indices, v.valores);
+       let maxIdx = 0;
+       let maxProb = 0;
+@@ -469,6 +594,11 @@ export function clasificarTexto(
+       if (mejorClase !== '__desconocido__' && maxProb >= umbralDinamico) {
+         return { intencion: mejorClase, confianza: maxProb, metodo: 'ml' };
+       }
++
++      // Se parece más a un ejemplo negativo que a cualquier intención
++      if (pipeline.tieneFueraDominio && mejorClase === '__desconocido__' && maxProb >= umbralDinamico) {
++        return { intencion: null, confianza: 0, metodo: 'ninguno' };
++      }
+     }
+   } catch {
+     // Continuar a sub-ventanas
+@@ -486,6 +616,12 @@ export function clasificarTexto(
+         const vSub = vectorizador.transform(subFragmento);
+         if (vSub.nnz === 0) continue;
+ 
++        // Una sola palabra conocida dentro de un párrafo no basta para decidir la intención
++        if (coberturaMinima > 0) {
++          const cSub = medirCobertura(subFragmento, pipeline);
++          if (cSub.conocidas < 2 || cSub.conocidas / cSub.total < coberturaMinima) continue;
++        }
++
+         const probs = clasificador.predictProba(vSub.indices, vSub.valores);
+         let localMax = 0;
+         let localIdx = 0;
+@@ -509,6 +645,10 @@ export function clasificarTexto(
+   }
+ 
+   // Fase 2: Respaldo Fuzzy con Levenshtein y sub-tokens
++  if (!superaCobertura(medirCobertura(textoLimpio, pipeline, true), coberturaMinima)) {
++    return { intencion: null, confianza: 0, metodo: 'ninguno' };
++  }
++
+   let maxSimilitud = 0;
+   let mejorMatch: string | null = null;
+   const msgClean = textoLimpio.toLowerCase();
+@@ -549,7 +689,8 @@ export function clasificarTexto(
+       for (const tMsg of tokensMsg) {
+         if (tMsg.length >= 5) {
+           for (const tRef of tokensRef) {
+-            if (tRef.length >= 5) {
++            // Una palabra idéntica no es un error tipográfico: no debe valer 100% por sí sola
++            if (tRef.length >= 5 && tMsg !== tRef) {
+               const tokSim = fuzzRatio(tMsg, tRef);
+               if (tokSim > similitud) {
+                 similitud = tokSim;
+diff --git a/src/core/dialog-manager.ts b/src/core/dialog-manager.ts
+index bb55399..a46eb8d 100644
+--- a/src/core/dialog-manager.ts
++++ b/src/core/dialog-manager.ts
+@@ -7,7 +7,7 @@ import {
+ } from '../types.js';
+ import { clasificarTexto, obtenerDistribucionProbabilidades, PipelineEntrenado } from './classifier.js';
+ import { SesionUsuario } from './session.js';
+-import { extraerTodosLosSlots, extraerVariable } from './slot-extractor.js';
++import { extraerTodosLosSlots, extraerVariable, resolverTipoSlot } from './slot-extractor.js';
+ import { VectorDatabaseIndex } from './vector-db.js';
+ 
+ export const MENSAJES_DEFAULT: Required<MensajesPorDefecto> = {
+@@ -94,7 +94,8 @@ export async function resolverTurnoDialogo(
+   umbralMl: number = 0.48,
+   umbralFuzzy: number = 78,
+   mensajesPorDefecto?: MensajesPorDefecto,
+-  conectoresTexto?: string[]
++  conectoresTexto?: string[],
++  coberturaMinima: number = 0
+ ): Promise<ResultadoInferencia> {
+   const tInicio = performance.now();
+   sesion.registrarMensajeUsuario(mensajeUsuario);
+@@ -109,7 +110,15 @@ export async function resolverTurnoDialogo(
+     const slotCfg = esquemaSlots[slotName];
+ 
+     if (slotCfg) {
+-      const valorExtraido = extraerVariable(mensajeUsuario, slotName, slotCfg, true, conectoresTexto);
++      // El texto libre captura casi todo, así que primero se descarta un cambio de tema
++      let esCambioDeTema = false;
++      if (resolverTipoSlot(slotCfg) === 'texto') {
++        const clasifPrevia = clasificarTexto(mensajeUsuario, pipeline, umbralMl, umbralFuzzy, coberturaMinima);
++        esCambioDeTema = !!clasifPrevia.intencion && clasifPrevia.intencion !== sesion.intencionPendiente;
++      }
++      const valorExtraido = esCambioDeTema
++        ? null
++        : extraerVariable(mensajeUsuario, slotName, slotCfg, true, conectoresTexto);
+       if (valorExtraido !== null && valorExtraido !== undefined && String(valorExtraido).trim() !== '') {
+         // [CAMINO A] Captura Exitosa: El usuario respondió el dato solicitado
+         sesion.contexto[slotName] = String(valorExtraido).trim();
+@@ -124,7 +133,7 @@ export async function resolverTurnoDialogo(
+       } else {
+         // [CAMINO B o C] El usuario no proporcionó el dato esperado.
+         // Consultamos a la Red Neuronal para saber si hubo Cambio de Tema / Interrupción:
+-        const clasifCambio = clasificarTexto(mensajeUsuario, pipeline, umbralMl, umbralFuzzy);
++        const clasifCambio = clasificarTexto(mensajeUsuario, pipeline, umbralMl, umbralFuzzy, coberturaMinima);
+ 
+         if (clasifCambio.intencion && clasifCambio.intencion !== sesion.intencionPendiente) {
+           // [CAMINO B] INTERRUPCIÓN / CONTEXT SWITCH (Estrategia B: Memoria Retenida)
+@@ -165,14 +174,14 @@ export async function resolverTurnoDialogo(
+ 
+   // 2. Si no se resolvió por slot pendiente (o si el usuario inició una nueva intención)
+   if (!intencionDetectada) {
+-    const resClasif = clasificarTexto(mensajeUsuario, pipeline, umbralMl, umbralFuzzy);
++    const resClasif = clasificarTexto(mensajeUsuario, pipeline, umbralMl, umbralFuzzy, coberturaMinima);
+     intencionDetectada = resClasif.intencion;
+     confianza = resClasif.confianza;
+     metodo = resClasif.metodo;
+   }
+ 
+   // Extraer todos los slots nuevos presentes en el mensaje
+-  const slotsNuevos = extraerTodosLosSlots(mensajeUsuario, esquemaSlots, conectoresTexto);
++  const slotsNuevos = extraerTodosLosSlots(mensajeUsuario, esquemaSlots, conectoresTexto, true);
+   for (const [k, v] of Object.entries(slotsNuevos)) {
+     sesion.contexto[k] = v;
+     sesion.contexto[`slot.${k}`] = v;
+diff --git a/src/core/slot-extractor.ts b/src/core/slot-extractor.ts
+index 1675eed..2b423d0 100644
+--- a/src/core/slot-extractor.ts
++++ b/src/core/slot-extractor.ts
+@@ -355,7 +355,8 @@ export function extraerVariable(
+ export function extraerTodosLosSlots(
+   texto: string,
+   esquema: EsquemaSlots,
+-  conectoresGlobales?: string[]
++  conectoresGlobales?: string[],
++  omitirTexto: boolean = false
+ ): Record<string, string> {
+   const extraidos: Record<string, string> = {};
+   if (!texto || !esquema) return extraidos;
+@@ -370,6 +371,9 @@ export function extraerTodosLosSlots(
+       continue;
+     }
+ 
++    // El texto libre acepta casi cualquier frase: solo es confiable cuando se pidió ese dato
++    if (omitirTexto && tipo === 'texto') continue;
++
+     const valor = extraerVariable(texto, slotName, config, false, conectoresGlobales);
+     if (valor !== null && valor !== undefined && String(valor).trim() !== '') {
+       extraidos[slotName] = String(valor).trim();
+diff --git a/src/index.ts b/src/index.ts
+index 4586c3d..9aa5190 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,9 +1,12 @@
+ import defaultModel from './presets/default-model.json' with { type: 'json' };
+ import {
++  COBERTURA_MINIMA_DEFAULT,
+   entrenarClasificador,
+   clasificarTexto,
+   obtenerDistribucionProbabilidades,
+-  PipelineEntrenado
++  PALABRAS_VACIAS_DEFAULT,
++  PipelineEntrenado,
++  serializarPesos
+ } from './core/classifier.js';
+ import { resolverTurnoDialogo } from './core/dialog-manager.js';
+ import { SesionUsuario } from './core/session.js';
+@@ -17,6 +20,7 @@ import {
+   IaConiaConfig,
+   IntencionDef,
+   MensajesPorDefecto,
++  PesosSerializados,
+   ProbabilidadIntencion,
+   ResultadoInferencia
+ } from './types.js';
+@@ -39,7 +43,11 @@ export class IaConia {
+   public mensajesPorDefecto: MensajesPorDefecto;
+   public camposIgnoradosDb: string[];
+   public conectoresTexto: string[];
++  public ejemplosFueraDominio: string[];
++  public palabrasVacias: string[];
++  public coberturaMinima: number;
+ 
++  private pesosPendientes: PesosSerializados | undefined;
+   private pipeline: PipelineEntrenado | null = null;
+   private indiceVectorial: VectorDatabaseIndex;
+   private sesiones: Map<string, SesionUsuario> = new Map();
+@@ -70,6 +78,11 @@ export class IaConia {
+       'y', 'e', 'o', 'u', 'de', 'del', 'en', 'con', 'para', 'por', 'a'
+     ];
+ 
++    this.ejemplosFueraDominio = config?.ejemplosFueraDominio || [];
++    this.palabrasVacias = config?.palabrasVacias || [...PALABRAS_VACIAS_DEFAULT];
++    this.coberturaMinima = config?.coberturaMinima ?? COBERTURA_MINIMA_DEFAULT;
++    this.pesosPendientes = config?.pesosEntrenados;
++
+     this.indiceVectorial = new VectorDatabaseIndex(this.baseDatos, this.camposIgnoradosDb);
+     this.entrenar();
+   }
+@@ -80,10 +93,15 @@ export class IaConia {
+    */
+   public entrenar(): this {
+     if (this.baseConocimiento && this.baseConocimiento.length > 0) {
+-      this.pipeline = entrenarClasificador(this.baseConocimiento, this.esquemaSlots);
++      this.pipeline = entrenarClasificador(this.baseConocimiento, this.esquemaSlots, {
++        ejemplosFueraDominio: this.ejemplosFueraDominio,
++        palabrasVacias: this.palabrasVacias,
++        pesosGuardados: this.pesosPendientes
++      });
+     } else {
+       this.pipeline = null;
+     }
++    this.pesosPendientes = undefined;
+     return this;
+   }
+ 
+@@ -148,7 +166,8 @@ export class IaConia {
+       this.umbralClasificacion,
+       this.umbralFuzzy,
+       this.mensajesPorDefecto,
+-      this.conectoresTexto
++      this.conectoresTexto,
++      this.coberturaMinima
+     );
+   }
+ 
+@@ -165,7 +184,7 @@ export class IaConia {
+   public clasificar(texto: string): { intencion: string | null; confianza: number; metodo: string } {
+     if (!this.pipeline) this.entrenar();
+     if (!this.pipeline) return { intencion: null, confianza: 0, metodo: 'ninguno' };
+-    return clasificarTexto(texto, this.pipeline, this.umbralClasificacion, this.umbralFuzzy);
++    return clasificarTexto(texto, this.pipeline, this.umbralClasificacion, this.umbralFuzzy, this.coberturaMinima);
+   }
+ 
+   /**
+@@ -499,16 +518,19 @@ export class IaConia {
+ 
+   /**
+    * Exporta toda la configuración y conocimiento del bot a un objeto JSON serializable.
+-   * Serializa RegExp a strings para garantizar 100% de compatibilidad con JSON.stringify().
++   * Serializa RegExp a strings (conservando sus flags) para garantizar 100% de compatibilidad con JSON.stringify().
++   * Incluye los pesos para restaurar sin reentrenar; usa { incluirPesos: false } si priorizas el tamaño.
+    */
+-  public exportModel(): IaConiaConfig {
++  public exportModel(opciones?: { incluirPesos?: boolean }): IaConiaConfig {
+     const slotsSerializados: EsquemaSlots = {};
+     for (const [k, v] of Object.entries(this.esquemaSlots)) {
+       const slotCopia = { ...v };
+       if (slotCopia.regex) {
+         if (slotCopia.regex instanceof RegExp) {
++          slotCopia.regexFlags = slotCopia.regex.flags;
+           slotCopia.regex = slotCopia.regex.source;
+         } else if (Array.isArray(slotCopia.regex)) {
++          slotCopia.regexFlags = slotCopia.regex.map(r => (r instanceof RegExp ? r.flags : null));
+           slotCopia.regex = slotCopia.regex.map(r => (r instanceof RegExp ? r.source : String(r)));
+         }
+       }
+@@ -524,7 +546,13 @@ export class IaConia {
+       umbralFuzzy: this.umbralFuzzy,
+       mensajesPorDefecto: this.mensajesPorDefecto,
+       camposIgnoradosDb: this.camposIgnoradosDb,
+-      conectoresTexto: this.conectoresTexto
++      conectoresTexto: this.conectoresTexto,
++      ejemplosFueraDominio: this.ejemplosFueraDominio,
++      palabrasVacias: this.palabrasVacias,
++      coberturaMinima: this.coberturaMinima,
++      ...(opciones?.incluirPesos !== false && this.pipeline
++        ? { pesosEntrenados: serializarPesos(this.pipeline) }
++        : {})
+     };
+   }
+ 
+@@ -543,13 +571,16 @@ export class IaConia {
+       for (const [k, v] of Object.entries(es as Record<string, EsquemaSlot>)) {
+         if (!v || typeof v !== 'object') continue;
+         const slotCopia: EsquemaSlot = { ...v };
+-        if (slotCopia.regex) {
+-          if (typeof slotCopia.regex === 'string') {
+-            slotCopia.regex = new RegExp(slotCopia.regex);
+-          } else if (Array.isArray(slotCopia.regex)) {
+-            slotCopia.regex = slotCopia.regex.map((r: any) => (typeof r === 'string' ? new RegExp(r) : r));
+-          }
++        // Sin flags guardados se mantiene el string: la extracción lo compila con sus flags por defecto
++        const flags = slotCopia.regexFlags;
++        if (typeof slotCopia.regex === 'string' && typeof flags === 'string') {
++          slotCopia.regex = new RegExp(slotCopia.regex, flags);
++        } else if (Array.isArray(slotCopia.regex) && Array.isArray(flags)) {
++          slotCopia.regex = slotCopia.regex.map((r: any, i: number) =>
++            typeof r === 'string' && typeof flags[i] === 'string' ? new RegExp(r, flags[i]) : r
++          );
+         }
++        delete slotCopia.regexFlags;
+         slotsReconstruidos[k] = slotCopia;
+       }
+       this.esquemaSlots = slotsReconstruidos;
+@@ -580,6 +611,11 @@ export class IaConia {
+       this.umbralFuzzy = uFuzzy;
+     }
+ 
++    if (modelJson.ejemplosFueraDominio) this.ejemplosFueraDominio = [...modelJson.ejemplosFueraDominio];
++    if (modelJson.palabrasVacias) this.palabrasVacias = [...modelJson.palabrasVacias];
++    if (modelJson.coberturaMinima !== undefined) this.coberturaMinima = modelJson.coberturaMinima;
++    this.pesosPendientes = modelJson.pesosEntrenados;
++
+     return this.entrenar();
+   }
+ }
+diff --git a/src/types.ts b/src/types.ts
+index afa019d..68ec6cd 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -81,6 +81,20 @@ export interface IaConiaConfig {
+   mensajesPorDefecto?: MensajesPorDefecto;
+   camposIgnoradosDb?: string[];
+   conectoresTexto?: string[];
++  ejemplosFueraDominio?: string[];
++  palabrasVacias?: string[];
++  coberturaMinima?: number;
++  pesosEntrenados?: PesosSerializados;
+   [key: string]: any;
+ }
+ 
++export interface PesosSerializados {
++  huella: string;
++  vocabulario: string[];
++  idf: string;
++  totalDocs: number;
++  clases: string[];
++  pesos: string[];
++  sesgos: string;
++}
++
+diff --git a/test/regresion.test.mjs b/test/regresion.test.mjs
+new file mode 100644
+index 0000000..9f9f6e1
+--- /dev/null
++++ b/test/regresion.test.mjs
+@@ -0,0 +1,77 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { IaConia } from '../dist/index.js';
++
++const base = [
++  { intension: 'estatus_asegurado', expresiones: ['quiero saber mi estatus del asegurado', 'estoy asegurado', 'consultar mi seguro esta activo', 'verificar si estoy afiliado', 'saber si tengo seguro vigente'] },
++  { intension: 'coberturas', expresiones: ['cuales son las coberturas', 'que cubre el seguro', 'que beneficios tengo', 'me cubre una operacion'] },
++  { intension: 'reembolsos', expresiones: ['como gestionar un reembolso', 'quiero que me devuelvan el dinero', 'requisitos para reembolso', 'cuanto demora el reembolso'] },
++  { intension: 'transferir_asesor', expresiones: ['quiero hablar con un asesor', 'comunicame con una persona', 'pasame con un agente', 'necesito un humano'] }
++];
++const crear = extra => new IaConia({ nombre: 't', baseConocimiento: base, esquemaSlots: {}, ...extra });
++
++test('rechaza mensajes fuera de dominio', () => {
++  const bot = crear();
++  for (const texto of ['el partido de ayer estuvo buenazo', 'mañana llueve en lima segun el noticiero', 'el dinero no alcanza para el alquiler', 'mi vecino trabaja de agente inmobiliario']) {
++    assert.equal(bot.clasificar(texto).intencion, null, texto);
++  }
++});
++
++test('sigue reconociendo frases del dominio, compuestas y con errores', () => {
++  const bot = crear();
++  assert.equal(bot.clasificar('quiero saber mi estatus del asegurado').intencion, 'estatus_asegurado');
++  assert.equal(bot.clasificar('hola buen dia disculpe quiero hablar con un asesor gracias').intencion, 'transferir_asesor');
++  assert.equal(bot.clasificar('como gestionar un reembolzo').intencion, 'reembolsos');
++});
++
++test('una palabra identica no da 100% de confianza', () => {
++  const bot = crear({ coberturaMinima: 0, umbralClasificacion: 0.99 });
++  assert.notEqual(bot.clasificar('zapatos dinero').confianza, 1);
++});
++
++test('los ejemplos negativos rechazan negaciones', () => {
++  const bot = crear({ ejemplosFueraDominio: ['no quiero hablar con un asesor', 'no quiero ningun reembolso'] });
++  assert.equal(bot.clasificar('no quiero hablar con un asesor').intencion, null);
++  assert.equal(bot.clasificar('quiero hablar con un asesor').intencion, 'transferir_asesor');
++});
++
++test('el slot de texto no se sobrescribe y permite cambiar de tema', async () => {
++  const bot = new IaConia({
++    nombre: 't',
++    baseConocimiento: [...base, { intension: 'registro', expresiones: ['quiero registrarme', 'hacer un registro'], slots: ['nombre', 'telefono'], respuestas: ['{slot.nombre} {slot.telefono}'] }],
++    esquemaSlots: {
++      nombre: { tipo: 'texto', ignorar: ['me llamo', 'mi nombre es', 'soy'], formato: 'title', pregunta: 'nombre?' },
++      telefono: { tipo: 'regex', regex: /\b\d{9}\b/, pregunta: 'tel?' }
++    }
++  });
++  assert.equal((await bot.ask('quiero registrarme', 's')).reply, 'nombre?');
++  assert.equal((await bot.ask('cuales son las coberturas', 's')).intent, 'coberturas');
++  assert.equal((await bot.ask('quiero registrarme', 's')).reply, 'nombre?');
++  assert.equal((await bot.ask('me llamo carlos gomez', 's')).reply, 'tel?');
++  assert.equal((await bot.ask('cuales son las coberturas', 's')).slots.nombre, 'Carlos Gomez');
++  assert.equal((await bot.ask('quiero registrarme', 's')).reply, 'tel?');
++  assert.equal((await bot.ask('987654321', 's')).reply, 'Carlos Gomez 987654321');
++});
++
++test('export y carga conservan flags de regex', () => {
++  const bot = crear({ esquemaSlots: { cod: { tipo: 'regex', regex: /[a-z]{2}-?\d{6}/i } } });
++  const copia = new IaConia().loadModel(JSON.parse(JSON.stringify(bot.exportModel())));
++  assert.deepEqual(copia.extraerSlots('codigo MX-123456'), { cod: 'MX-123456' });
++});
++
++test('la carga restaura los pesos sin cambiar resultados', () => {
++  const bot = crear();
++  const modelo = JSON.parse(JSON.stringify(bot.exportModel()));
++  assert.ok(modelo.pesosEntrenados);
++  const copia = new IaConia().loadModel(modelo);
++  const texto = 'quiero saber de mi reembolso';
++  assert.deepEqual(copia.obtenerProbabilidades(texto), bot.obtenerProbabilidades(texto));
++  assert.equal(crear().exportModel({ incluirPesos: false }).pesosEntrenados, undefined);
++});
++
++test('pesos de otras frases se ignoran y se reentrena', () => {
++  const modelo = JSON.parse(JSON.stringify(crear().exportModel()));
++  modelo.baseConocimiento = [...modelo.baseConocimiento, { intension: 'citas', expresiones: ['quiero una cita medica', 'agendar una cita'] }];
++  const copia = new IaConia().loadModel(modelo);
++  assert.equal(copia.clasificar('quiero una cita medica').intencion, 'citas');
++});
+-- 
+2.34.1
+

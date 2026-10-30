@@ -5,7 +5,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-Ready-blue.svg)](https://www.typescriptlang.org/)
 [![Bundle Size](https://img.shields.io/bundlephobia/minzip/iaconia)](https://bundlephobia.com/package/iaconia)
 
-> **IaConia** es un motor de **Inteligencia Artificial Conversacional (NLU)** y clasificación semántica ultraligero que funciona **100% en la memoria RAM** de tu aplicación. 
+> **IaConia** es un motor de **Inteligencia Artificial Conversacional (NLU)** y clasificación de intenciones ultraligero que funciona **100% en la memoria RAM** de tu aplicación. 
 > 
 > Responde en **menos de 2 milisegundos**, es 100% privado (no envía tus datos a servidores externos ni consume costos por token), no requiere GPUs y funciona tanto en **Node.js** como en navegadores web (**React, Vue, Vite, Next.js**) sin necesidad de conexión a internet.
 
@@ -13,8 +13,8 @@
 
 ## ⚡ Características Principales
 
-- ⚡ **Latencia ultrabaja (< 2ms):** Inferencia instantánea en memoria RAM mediante álgebra lineal nativa.
-- 📦 **Cero dependencias pesadas:** TF-IDF n-gramas + Regresión Logística Softmax + Distancia Levenshtein + Motor Vectorial RAG en TypeScript nativo.
+- ⚡ **Baja latencia en turnos cortos:** Inferencia en memoria RAM, normalmente por debajo de 2 ms. Los textos largos pueden tardar mucho más: clasifica turno por turno.
+- 📦 **Cero dependencias pesadas:** TF-IDF n-gramas + Regresión Logística Softmax + Distancia Levenshtein + Motor de Búsqueda Vectorial en TypeScript nativo.
 - 🎯 **Preentrenado de fábrica:** Responde de inmediato saludos, soporte, despedidas y comandos sin necesidad de configuración previa.
 - 🛡️ **Seguridad y Privacidad Absoluta:** Las intenciones y slots se procesan localmente en el dispositivo. Si requieres consultar APIs privadas o bases de datos externas, se delegan de forma segura mediante `onAction()`.
 - 🔀 **Cambio de contexto en vivo:** Algoritmo de 3 vías con memoria retenida que no traba al usuario cuando cambia de tema.
@@ -64,7 +64,7 @@ console.log(respuesta.latencyMs);     // 1.15ms
 3. [2. Extracción de Entidades y Variables (Slots)](#-2-las-4-formas-de-capturar-datos-los-slots)
 4. [3. Conversaciones Fluidas y Manejo de Errores](#-3-conversaciones-fluidas-y-manejo-de-errores)
 5. [4. Conectar a APIs Externas (`onAction`)](#-4-conectar-el-bot-a-apis-externas-onaction)
-6. [5. Base de Datos Vectorial y RAG en Memoria (Búsqueda Semántica)](#-5-base-de-datos-vectorial-y-rag-en-memoria-búsqueda-semántica)
+6. [5. Base de Datos Vectorial en Memoria (Búsqueda Léxica)](#-5-base-de-datos-vectorial-en-memoria-búsqueda-léxica)
 7. [6. Objeto de Inferencia Enriquecido (`ResultadoInferencia`)](#-6-qué-información-te-devuelve-cada-mensaje)
 8. [7. Guardar y Cargar el Cerebro del Bot (`exportModel` y `loadModel`)](#-7-guardar-y-cargar-el-cerebro-del-bot-exportmodel-y-loadmodel)
 9. [8. Distribución de Probabilidades, Softmax y Detección de Ambigüedad](#-8-distribución-de-probabilidades-softmax-y-manejo-de-ambigüedad)
@@ -87,7 +87,7 @@ Todos los métodos tienen nombres directos, limpios y consistentes en TypeScript
 | **`bot.getNeurona(nombre)`**| Te da la información detallada de una neurona (sus expresiones y respuestas). | `bot.getNeurona("ayuda")` |
 | **`bot.agregarNeurona(def)`**| Le enseña una nueva intención al bot con sus expresiones y respuestas. *(Alias: `addIntent()`)* | `bot.agregarNeurona({ intension: "...", expresiones: [...] })` |
 | **`bot.actualizarNeurona(nombre, data)`**| Modifica las expresiones, respuestas o datos de una neurona existente. | `bot.actualizarNeurona("saludo", { respuestas: [...] })` |
-| **`bot.eliminarNeurona(nombre)`**| Borra una neurona del bot y actualiza su red en 2 milisegundos. *(Alias: `removeIntent()`)* | `bot.eliminarNeurona("despedida")` |
+| **`bot.eliminarNeurona(nombre)`**| Borra una neurona del bot y la reentrena. *(Alias: `removeIntent()`)* | `bot.eliminarNeurona("despedida")` |
 | **`bot.agregarFrase(neurona, frase)`**| Le enseña una nueva forma de hablar al bot para una neurona. | `bot.agregarFrase("saludo", "qué tal amigo")` |
 | **`bot.eliminarFrase(neurona, frase)`**| Quita una frase de ejemplo de una neurona. | `bot.eliminarFrase("saludo", "buenos días")` |
 | **`bot.addSlot(nombre, config)`**| Le enseña al bot a reconocer un dato importante (nombre, teléfono, catálogo). *(Alias: `agregarSlot()`)* | `bot.addSlot("telefono", { tipo: "regex", regex: /\d{10}/ })` |
@@ -95,7 +95,7 @@ Todos los métodos tienen nombres directos, limpios y consistentes en TypeScript
 | **`bot.getSlot(nombre)`** | Muestra cómo está configurado un dato en particular. | `bot.getSlot("telefono")` |
 | **`bot.eliminarSlot(nombre)`** | Borra un dato de la configuración del bot. | `bot.eliminarSlot("telefono")` |
 | **`bot.extraerSlots(texto)`** | Lee un texto y te devuelve los datos encontrados sin avanzar el chat. | `bot.extraerSlots("mi cel es 5512345678")` |
-| **`bot.buscarBaseDatos(query, n?)`** | Búsqueda semántica vectorial por similitud coseno en la base de datos interna. | `bot.buscarBaseDatos("jamon con piña", 2)` |
+| **`bot.buscarBaseDatos(query, n?)`** | Búsqueda léxica vectorial (TF-IDF y similitud coseno) en la base de datos interna. | `bot.buscarBaseDatos("jamon con piña", 2)` |
 | **`bot.cargarBaseDatos(lista)`** | Carga o reemplaza el catálogo/documentos e indexa los vectores en memoria. *(Alias: `loadDatabase()`)* | `bot.cargarBaseDatos([...])` |
 | **`bot.agregarRegistro(doc)`** | Agrega un producto o documento a la base de datos vectorial en caliente. *(Alias: `addRecord()`)* | `bot.agregarRegistro({ nombre: "..." })` |
 | **`bot.getBaseDatos()`** | Retorna todos los documentos indexados en la base de datos. *(Alias: `getDatabase()`)* | `bot.getBaseDatos()` |
@@ -285,7 +285,7 @@ bot.addSlot("sabor_pizza", {
 ---
 
 ### 3️⃣ Tipo `texto` (Lenguaje abierto con lista `ignorar`)
-Para capturar datos libres como nombres o direcciones. En lugar de complicarte con tres arrays distintos, tienes una sola lista limpia: **`ignorar`**:
+Para capturar datos libres como nombres o direcciones. Durante una conversación solo se captura cuando el bot pidió ese dato, para que otras frases no lo sobrescriban. En lugar de complicarte con tres arrays distintos, tienes una sola lista limpia: **`ignorar`**:
 
 ```javascript
 bot.addSlot("nombre_cliente", {
@@ -439,14 +439,14 @@ bot.onAction("CONSULTAR_PEDIDO_API", async ({ slots }) => {
 
 ---
 
-## 🗄️ 5. Base de Datos Vectorial y RAG en Memoria (Búsqueda Semántica)
+## 🗄️ 5. Base de Datos Vectorial en Memoria (Búsqueda Léxica)
 
-**IaConia** incluye un **motor RAG (Retrieval-Augmented Generation) vectorial ultraligero que corre 100% en la memoria RAM** de tu aplicación. 
+**IaConia** incluye un **motor de recuperación vectorial ultraligero que corre 100% en la memoria RAM** de tu aplicación. 
 
 A diferencia de las bases de datos vectoriales tradicionales en la nube (como Pinecone, ChromaDB o Qdrant) que requieren conexión a internet y añaden cientos de milisegundos de latencia, el motor vectorial de IaConia:
 * Convierte cualquier lista de objetos JSON a vectores matemáticos dispersos (**TF-IDF + Cosine Similarity**).
-* Aplica **lematización morfológica en español** (entiende singulares, plurales, tildes y sinónimos).
-* Responde búsquedas semánticas en **menos de 1 milisegundo**.
+* Aplica **lematización morfológica en español** (reduce plurales y elimina tildes; no reconoce sinónimos).
+* Compara palabras, no significado: la consulta debe compartir términos con el documento. No genera texto.
 
 ---
 
@@ -482,13 +482,13 @@ bot.cargarBaseDatos([
 
 ---
 
-### B. Búsqueda Semántica Directa (Por Significado)
+### B. Búsqueda Léxica Directa (Por Palabras)
 
-Puedes consultar la base de datos vectorial directamente en tu código. El motor encontrará el registro adecuado **incluso si el usuario no dice el nombre exacto**:
+Puedes consultar la base de datos vectorial directamente en tu código. El motor encontrará el registro que comparta palabras con la consulta, **aunque el usuario no diga el nombre exacto**:
 
 ```javascript
-// El usuario nunca dijo "hawaiana", pero busca por ingredientes:
-const resultados = bot.buscarBaseDatos("quiero algo con jamon y fruta", 1);
+// El usuario nunca dijo "hawaiana", pero menciona un ingrediente que aparece en el registro:
+const resultados = bot.buscarBaseDatos("quiero algo con jamon", 1);
 
 console.log(resultados[0].nombre); // "Pizza Hawaiana Especial"
 console.log(resultados[0].precio); // "$165 MXN"
@@ -594,7 +594,7 @@ console.log(res);
 Si configuraste neuronas, slots, umbrales o registros en la base de datos y deseas guardarlos en un archivo JSON o en tu base de datos (PostgreSQL, MongoDB, Redis, etc.):
 
 ```javascript
-// 1. Exportar todo a un objeto JSON serializable en camelCase (pesa apenas ~2 KB a 50 KB):
+// 1. Exportar todo a un objeto JSON serializable en camelCase (con 50 intenciones y 600 frases: ~27 KB sin pesos, ~850 KB con pesos; usa `exportModel({ incluirPesos: false })` para omitirlos):
 const cerebro = bot.exportModel();
 const jsonString = JSON.stringify(cerebro, null, 2);
 
@@ -602,14 +602,15 @@ const jsonString = JSON.stringify(cerebro, null, 2);
 // - nombre: Nombre del bot
 // - baseConocimiento: Todas las neuronas, expresiones y respuestas
 // - esquemaSlots: Slots declarados (con RegExp serializadas de forma segura)
-// - baseDatos: Todos los documentos indexados en el motor vectorial RAG
+// - baseDatos: Todos los documentos indexados en el motor vectorial
+// - pesosEntrenados: Vocabulario y pesos para restaurar sin reentrenar
 // - umbralClasificacion y umbralFuzzy: Valores de calibración matemática
 // - mensajesPorDefecto, camposIgnoradosDb, conectoresTexto: Reglas dinámicas globales
 
 // 2. En cualquier otro servidor, API o frontend (React/Vue), cargarlo al instante:
 const nuevoBot = new IaConia();
 nuevoBot.loadModel(JSON.parse(jsonString)); 
-// ✅ Reentrena y reindexa en memoria RAM en < 2ms sin pérdida de datos
+// ✅ Restaura los pesos guardados y reindexa; solo reentrena si cambiaron las frases
 ```
 
 ---
@@ -728,7 +729,7 @@ const bot = new IaConia({
   },
 
   // 2. Campos Ignorados en Base de Datos Vectorial
-  // Evita que campos autoincrementales o códigos internos generen ruido en la búsqueda semántica
+  // Evita que campos autoincrementales o códigos internos generen ruido en la búsqueda
   camposIgnoradosDb: ["id", "_id", "created_at", "internal_code"],
 
   // 3. Conectores Gramaticales para Extracción de Texto Libre
@@ -749,6 +750,9 @@ const bot = new IaConia({
 | **`mensajesPorDefecto.intencionProcesada`** | `string` | `"He procesado tu solicitud de **{intencion}**."` | Respuesta emitida si una neurona no tiene `respuestas: []` definidas. |
 | **`camposIgnoradosDb`** | `string[]` | `["id", "_id", "fecha_creacion", "created_at"]` | Claves JSON que el vectorizador omite para no indexar basura numérica. |
 | **`conectoresTexto`** | `string[]` | `["y", "e", "o", "u", "de", "del", "en", "con", ...]` | Conectores gramaticales a recortar al final de campos de texto libre. |
+| **`ejemplosFueraDominio`** | `string[]` | `[]` | Frases que el bot debe rechazar, como negaciones o temas ajenos a tu negocio. |
+| **`coberturaMinima`** | `number` | `0.34` | Porción mínima de palabras con contenido que el modelo debe conocer. `0` desactiva el filtro. Valores altos rechazan más frases válidas; calíbralo con tus datos. |
+| **`palabrasVacias`** | `string[]` | Lista en español | Palabras excluidas del cálculo de cobertura. Reemplázala si tu bot usa otro idioma. |
 
 > **💡 Portabilidad Total:** Todos estos campos se incluyen automáticamente al invocar `bot.exportModel()` y se restauran al llamar `bot.loadModel(json)`.
 

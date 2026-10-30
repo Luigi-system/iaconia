@@ -1,6 +1,6 @@
 # 📚 Guía Definitiva y Documentación de `iaconia`
 
-> **IaConia** es un motor de Inteligencia Artificial Conversacional (NLU) ultraligero (< 45 KB), autónomo y determinista diseñado para ejecutarse **100% en el cliente (navegador web o Node.js)** con latencia sub-milisegundo (< 2 ms) y cero costos de servidor.
+> **IaConia** es un motor de Inteligencia Artificial Conversacional (NLU) ultraligero (< 45 KB), autónomo y determinista diseñado para ejecutarse **100% en el cliente (navegador web o Node.js)** con latencia normalmente menor a 2 ms en turnos cortos y cero costos de servidor.
 
 ---
 
@@ -26,7 +26,7 @@
    - [Receta 1: Componente de Chat en React](#receta-1-componente-en-react)
    - [Receta 2: Agendamiento de Citas con Slots Obligatorios](#receta-2-agendamiento-de-citas)
    - [Receta 3: Conexión Segura con Backend Privado](#receta-3-conexión-con-backend-seguro)
-   - [Receta 4: Búsqueda Semántica de Catálogo](#receta-4-búsqueda-semántica)
+   - [Receta 4: Búsqueda Léxica de Catálogo](#receta-4-búsqueda-léxica)
 7. [Buenas Prácticas y Calibración](#7-buenas-prácticas-y-calibración)
 
 ---
@@ -202,7 +202,7 @@ bot.onAction("CONSULTAR_SALDO_API", async ({ slots, sessionId }) => {
 ---
 
 ### 4.5. Base de Datos Vectorial
-IaConia incluye una base de datos vectorial en memoria que indexa cualquier JSON arbitrario y realiza **búsqueda semántica** mediante TF-IDF, similitud coseno y lematización en español:
+IaConia incluye una base de datos vectorial en memoria que indexa cualquier JSON arbitrario y realiza **búsqueda léxica** mediante TF-IDF, similitud coseno y reducción de plurales en español. Compara palabras, no significado, y no reconoce sinónimos:
 
 ```javascript
 bot.baseDatos = [
@@ -211,8 +211,8 @@ bot.baseDatos = [
 ];
 bot.indiceVectorial.indexar(bot.baseDatos);
 
-// Búsqueda semántica instantánea
-const resultados = bot.buscarBaseDatos("computadora para juegos potente");
+// Búsqueda por palabras compartidas con el registro
+const resultados = bot.buscarBaseDatos("laptop gamer potente");
 console.log(resultados[0].producto); // "Laptop Gamer Pro"
 ```
 
@@ -229,9 +229,12 @@ const bot = new IaConia({
   baseConocimiento?: IntencionDef[];  // Intenciones iniciales (Default: modelo preentrenado)
   esquemaSlots?: EsquemaSlots;        // Configuración de slots iniciales
   tokensBloqueo?: string[];           // Palabras o insultos bloqueados
-  baseDatos?: any[];                  // Registros JSON para búsqueda semántica
+  baseDatos?: any[];                  // Registros JSON para búsqueda léxica
   umbralClasificacion?: number;       // Umbral mínimo ML (Default: 0.45)
   umbralFuzzy?: number;               // Umbral mínimo difuso (Default: 76)
+  ejemplosFueraDominio?: string[];    // Frases que el bot debe rechazar (Default: [])
+  coberturaMinima?: number;           // Porción mínima de palabras conocidas (Default: 0.34; 0 lo desactiva)
+  palabrasVacias?: string[];          // Palabras excluidas de la cobertura (Default: lista en español)
 });
 ```
 
@@ -275,14 +278,14 @@ const probs = bot.obtenerProbabilidades("Hola");
 Extrae todas las entidades y slots presentes en el texto según el esquema configurado.
 
 #### `bot.buscarBaseDatos(query: string, limite?: number): any[]`
-Ejecuta una búsqueda vectorial semántica con similitud coseno sobre la base de datos interna.
+Ejecuta una búsqueda vectorial léxica con similitud coseno sobre la base de datos interna.
 
 ---
 
 ### Métodos de Gestión y Entrenamiento
 
 #### `bot.addIntent(intencionDef: IntencionDef): this`
-Agrega o actualiza una intención en caliente y reentrena el modelo en memoria en < 5ms. Permite encadenamiento de métodos (*chaining*).
+Agrega o actualiza una intención en caliente y reentrena el modelo completo en memoria; con modelos grandes puede tardar cientos de milisegundos o más. Permite encadenamiento de métodos (*chaining*).
 
 #### `bot.addSlot(nombreSlot: string, config: EsquemaSlot): this`
 Registra un nuevo slot en el esquema de extracción.
@@ -293,11 +296,11 @@ Registra un callback asíncrono para ejecutar lógica de negocio cuando una inte
 #### `bot.entrenar(): this`
 Fuerza un reentrenamiento completo del vocabulario TF-IDF y la regresión logística en memoria RAM.
 
-#### `bot.exportModel(): Record<string, any>`
-Exporta toda la base de conocimiento, slots, constantes y datos a un objeto JSON serializable.
+#### `bot.exportModel(opciones?: { incluirPesos?: boolean }): Record<string, any>`
+Exporta la base de conocimiento, slots, constantes, datos y pesos entrenados a un objeto JSON serializable. Con `incluirPesos: false` el archivo es más pequeño, pero la carga vuelve a entrenar.
 
 #### `bot.loadModel(modelJson: Record<string, any>): this`
-Carga un modelo completo desde un JSON arbitrario y lo entrena inmediatamente.
+Carga un modelo completo desde un JSON. Restaura los pesos guardados si las frases no cambiaron; de lo contrario, reentrena.
 
 ---
 
@@ -463,7 +466,8 @@ bot.onAction("CONSULTAR_API_PAQUETERIA", async ({ slots }) => {
 4. **Exportar a LocalStorage:** Puedes guardar el estado del bot en el navegador del usuario fácilmente:
    ```javascript
    // Guardar
-   localStorage.setItem('mi_modelo_iaconia', JSON.stringify(bot.exportModel()));
+   // Sin pesos para no agotar la cuota de localStorage con modelos grandes
+   localStorage.setItem('mi_modelo_iaconia', JSON.stringify(bot.exportModel({ incluirPesos: false })));
    
    // Cargar en la siguiente visita
    const guardado = localStorage.getItem('mi_modelo_iaconia');

@@ -1,9 +1,12 @@
 import defaultModel from './presets/default-model.json' with { type: 'json' };
 import {
+  COBERTURA_MINIMA_DEFAULT,
   entrenarClasificador,
   clasificarTexto,
   obtenerDistribucionProbabilidades,
-  PipelineEntrenado
+  PALABRAS_VACIAS_DEFAULT,
+  PipelineEntrenado,
+  serializarPesos
 } from './core/classifier.js';
 import { resolverTurnoDialogo } from './core/dialog-manager.js';
 import { SesionUsuario } from './core/session.js';
@@ -17,6 +20,7 @@ import {
   IaConiaConfig,
   IntencionDef,
   MensajesPorDefecto,
+  PesosSerializados,
   ProbabilidadIntencion,
   ResultadoInferencia
 } from './types.js';
@@ -39,7 +43,11 @@ export class IaConia {
   public mensajesPorDefecto: MensajesPorDefecto;
   public camposIgnoradosDb: string[];
   public conectoresTexto: string[];
+  public ejemplosFueraDominio: string[];
+  public palabrasVacias: string[];
+  public coberturaMinima: number;
 
+  private pesosPendientes: PesosSerializados | undefined;
   private pipeline: PipelineEntrenado | null = null;
   private indiceVectorial: VectorDatabaseIndex;
   private sesiones: Map<string, SesionUsuario> = new Map();
@@ -70,6 +78,11 @@ export class IaConia {
       'y', 'e', 'o', 'u', 'de', 'del', 'en', 'con', 'para', 'por', 'a'
     ];
 
+    this.ejemplosFueraDominio = config?.ejemplosFueraDominio || [];
+    this.palabrasVacias = config?.palabrasVacias || [...PALABRAS_VACIAS_DEFAULT];
+    this.coberturaMinima = config?.coberturaMinima ?? COBERTURA_MINIMA_DEFAULT;
+    this.pesosPendientes = config?.pesosEntrenados;
+
     this.indiceVectorial = new VectorDatabaseIndex(this.baseDatos, this.camposIgnoradosDb);
     this.entrenar();
   }
@@ -80,10 +93,15 @@ export class IaConia {
    */
   public entrenar(): this {
     if (this.baseConocimiento && this.baseConocimiento.length > 0) {
-      this.pipeline = entrenarClasificador(this.baseConocimiento, this.esquemaSlots);
+      this.pipeline = entrenarClasificador(this.baseConocimiento, this.esquemaSlots, {
+        ejemplosFueraDominio: this.ejemplosFueraDominio,
+        palabrasVacias: this.palabrasVacias,
+        pesosGuardados: this.pesosPendientes
+      });
     } else {
       this.pipeline = null;
     }
+    this.pesosPendientes = undefined;
     return this;
   }
 
@@ -148,7 +166,8 @@ export class IaConia {
       this.umbralClasificacion,
       this.umbralFuzzy,
       this.mensajesPorDefecto,
-      this.conectoresTexto
+      this.conectoresTexto,
+      this.coberturaMinima
     );
   }
 
@@ -165,7 +184,7 @@ export class IaConia {
   public clasificar(texto: string): { intencion: string | null; confianza: number; metodo: string } {
     if (!this.pipeline) this.entrenar();
     if (!this.pipeline) return { intencion: null, confianza: 0, metodo: 'ninguno' };
-    return clasificarTexto(texto, this.pipeline, this.umbralClasificacion, this.umbralFuzzy);
+    return clasificarTexto(texto, this.pipeline, this.umbralClasificacion, this.umbralFuzzy, this.coberturaMinima);
   }
 
   /**
@@ -499,16 +518,19 @@ export class IaConia {
 
   /**
    * Exporta toda la configuración y conocimiento del bot a un objeto JSON serializable.
-   * Serializa RegExp a strings para garantizar 100% de compatibilidad con JSON.stringify().
+   * Serializa RegExp a strings (conservando sus flags) para garantizar 100% de compatibilidad con JSON.stringify().
+   * Incluye los pesos para restaurar sin reentrenar; usa { incluirPesos: false } si priorizas el tamaño.
    */
-  public exportModel(): IaConiaConfig {
+  public exportModel(opciones?: { incluirPesos?: boolean }): IaConiaConfig {
     const slotsSerializados: EsquemaSlots = {};
     for (const [k, v] of Object.entries(this.esquemaSlots)) {
       const slotCopia = { ...v };
       if (slotCopia.regex) {
         if (slotCopia.regex instanceof RegExp) {
+          slotCopia.regexFlags = slotCopia.regex.flags;
           slotCopia.regex = slotCopia.regex.source;
         } else if (Array.isArray(slotCopia.regex)) {
+          slotCopia.regexFlags = slotCopia.regex.map(r => (r instanceof RegExp ? r.flags : null));
           slotCopia.regex = slotCopia.regex.map(r => (r instanceof RegExp ? r.source : String(r)));
         }
       }
@@ -524,7 +546,13 @@ export class IaConia {
       umbralFuzzy: this.umbralFuzzy,
       mensajesPorDefecto: this.mensajesPorDefecto,
       camposIgnoradosDb: this.camposIgnoradosDb,
-      conectoresTexto: this.conectoresTexto
+      conectoresTexto: this.conectoresTexto,
+      ejemplosFueraDominio: this.ejemplosFueraDominio,
+      palabrasVacias: this.palabrasVacias,
+      coberturaMinima: this.coberturaMinima,
+      ...(opciones?.incluirPesos !== false && this.pipeline
+        ? { pesosEntrenados: serializarPesos(this.pipeline) }
+        : {})
     };
   }
 
@@ -543,13 +571,16 @@ export class IaConia {
       for (const [k, v] of Object.entries(es as Record<string, EsquemaSlot>)) {
         if (!v || typeof v !== 'object') continue;
         const slotCopia: EsquemaSlot = { ...v };
-        if (slotCopia.regex) {
-          if (typeof slotCopia.regex === 'string') {
-            slotCopia.regex = new RegExp(slotCopia.regex);
-          } else if (Array.isArray(slotCopia.regex)) {
-            slotCopia.regex = slotCopia.regex.map((r: any) => (typeof r === 'string' ? new RegExp(r) : r));
-          }
+        // Sin flags guardados se mantiene el string: la extracción lo compila con sus flags por defecto
+        const flags = slotCopia.regexFlags;
+        if (typeof slotCopia.regex === 'string' && typeof flags === 'string') {
+          slotCopia.regex = new RegExp(slotCopia.regex, flags);
+        } else if (Array.isArray(slotCopia.regex) && Array.isArray(flags)) {
+          slotCopia.regex = slotCopia.regex.map((r: any, i: number) =>
+            typeof r === 'string' && typeof flags[i] === 'string' ? new RegExp(r, flags[i]) : r
+          );
         }
+        delete slotCopia.regexFlags;
         slotsReconstruidos[k] = slotCopia;
       }
       this.esquemaSlots = slotsReconstruidos;
@@ -579,6 +610,11 @@ export class IaConia {
     if (uFuzzy !== undefined) {
       this.umbralFuzzy = uFuzzy;
     }
+
+    if (modelJson.ejemplosFueraDominio) this.ejemplosFueraDominio = [...modelJson.ejemplosFueraDominio];
+    if (modelJson.palabrasVacias) this.palabrasVacias = [...modelJson.palabrasVacias];
+    if (modelJson.coberturaMinima !== undefined) this.coberturaMinima = modelJson.coberturaMinima;
+    this.pesosPendientes = modelJson.pesosEntrenados;
 
     return this.entrenar();
   }

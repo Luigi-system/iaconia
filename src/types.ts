@@ -81,6 +81,20 @@ export interface IaConiaConfig {
   mensajesPorDefecto?: MensajesPorDefecto;
   camposIgnoradosDb?: string[];
   conectoresTexto?: string[];
+  ejemplosFueraDominio?: string[];
+  palabrasVacias?: string[];
+  coberturaMinima?: number;
+  pesosEntrenados?: PesosSerializados;
   [key: string]: any;
+}
+
+export interface PesosSerializados {
+  huella: string;
+  vocabulario: string[];
+  idf: string;
+  totalDocs: number;
+  clases: string[];
+  pesos: string[];
+  sesgos: string;
 }
 

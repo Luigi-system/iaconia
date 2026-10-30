@@ -355,7 +355,8 @@ export function extraerVariable(
 export function extraerTodosLosSlots(
   texto: string,
   esquema: EsquemaSlots,
-  conectoresGlobales?: string[]
+  conectoresGlobales?: string[],
+  omitirTexto: boolean = false
 ): Record<string, string> {
   const extraidos: Record<string, string> = {};
   if (!texto || !esquema) return extraidos;
@@ -369,6 +370,9 @@ export function extraerTodosLosSlots(
       }
       continue;
     }
+
+    // El texto libre acepta casi cualquier frase: solo es confiable cuando se pidió ese dato
+    if (omitirTexto && tipo === 'texto') continue;
 
     const valor = extraerVariable(texto, slotName, config, false, conectoresGlobales);
     if (valor !== null && valor !== undefined && String(valor).trim() !== '') {

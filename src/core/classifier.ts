@@ -1,4 +1,4 @@
-import { BaseConocimiento, EsquemaSlots, ProbabilidadIntencion } from '../types.js';
+import { BaseConocimiento, EsquemaSlots, PesosSerializados, ProbabilidadIntencion } from '../types.js';
 
 // =====================================================================
 // UTILIDADES DIFUSAS (CORRECTOR DE ERRORES ORTOGRÁFICOS Y LETRAS)
@@ -346,6 +346,67 @@ export interface PipelineEntrenado {
   clasificador: RegresionLogistica;
   catalogoIntenciones: Record<string, any>;
   frasesReferencia: Array<{ frase: string; intencion: string }>;
+  palabrasVacias: Set<string>;
+  unigramasLargos: string[];
+  tieneFueraDominio: boolean;
+  huella: string;
+}
+
+export interface OpcionesEntrenamiento {
+  ejemplosFueraDominio?: string[];
+  palabrasVacias?: string[];
+  pesosGuardados?: PesosSerializados;
+}
+
+export const COBERTURA_MINIMA_DEFAULT = 0.34;
+
+export const PALABRAS_VACIAS_DEFAULT: string[] = [
+  'a', 'al', 'ante', 'con', 'como', 'de', 'del', 'e', 'el', 'en', 'es', 'esa', 'ese', 'eso', 'esta', 'este', 'esto',
+  'la', 'las', 'le', 'les', 'lo', 'los', 'mas', 'me', 'mi', 'mis', 'muy', 'nos', 'o', 'para', 'por', 'que', 'se',
+  'su', 'sus', 'te', 'tu', 'tus', 'u', 'un', 'una', 'unas', 'unos', 'y', 'ya'
+];
+
+function calcularHuella(texto: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < texto.length; i++) {
+    h ^= texto.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+
+function floatABase64(valores: Float32Array): string {
+  const bytes = new Uint8Array(valores.buffer, valores.byteOffset, valores.byteLength);
+  let binario = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binario += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binario);
+}
+
+function base64AFloat(texto: string): Float32Array {
+  const binario = atob(texto);
+  const bytes = new Uint8Array(binario.length);
+  for (let i = 0; i < binario.length; i++) {
+    bytes[i] = binario.charCodeAt(i);
+  }
+  return new Float32Array(bytes.buffer);
+}
+
+/**
+ * 💾 Serializa el vocabulario y los pesos para restaurarlos sin volver a entrenar.
+ */
+export function serializarPesos(pipeline: PipelineEntrenado): PesosSerializados {
+  const { vectorizador, clasificador, huella } = pipeline;
+  return {
+    huella,
+    vocabulario: Array.from(vectorizador.vocabulario.keys()),
+    idf: floatABase64(vectorizador.idf),
+    totalDocs: vectorizador.totalDocs,
+    clases: clasificador.clases,
+    pesos: clasificador.pesos.map(floatABase64),
+    sesgos: floatABase64(clasificador.sesgos)
+  };
 }
 
 /**
@@ -355,7 +416,8 @@ export interface PipelineEntrenado {
  */
 export function entrenarClasificador(
   baseConocimiento: BaseConocimiento,
-  esquemaSlots?: EsquemaSlots
+  esquemaSlots?: EsquemaSlots,
+  opciones?: OpcionesEntrenamiento
 ): PipelineEntrenado {
   const textos: string[] = [];
   const etiquetas: string[] = [];
@@ -404,6 +466,13 @@ export function entrenarClasificador(
     throw new Error('La base de conocimiento no contiene frases de entrenamiento.');
   }
 
+  // Los ejemplos negativos entrenan el rechazo, pero no participan como referencia difusa
+  const ejemplosFueraDominio = (opciones?.ejemplosFueraDominio || []).map(e => e.trim()).filter(Boolean);
+  for (const ejemplo of ejemplosFueraDominio) {
+    textos.push(ejemplo);
+    etiquetas.push('__desconocido__');
+  }
+
   // Clase sintética si solo hay 1 intención registrada
   const clasesUnicas = Array.from(new Set(etiquetas));
   if (clasesUnicas.length === 1) {
@@ -412,18 +481,73 @@ export function entrenarClasificador(
     clasesUnicas.push('__desconocido__');
   }
 
-  const vectorizador = new VectorizadorTfidf().fit(textos);
-  const muestras = textos.map(t => vectorizador.transform(t));
-
+  const huella = calcularHuella(JSON.stringify([textos, etiquetas]));
+  const vectorizador = new VectorizadorTfidf();
   const clasificador = new RegresionLogistica();
-  clasificador.fit(muestras, etiquetas, vectorizador.vocabulario.size, clasesUnicas);
+  const guardados = opciones?.pesosGuardados;
+
+  // Solo se reutilizan pesos entrenados con exactamente las mismas frases
+  if (guardados && guardados.huella === huella) {
+    guardados.vocabulario.forEach((token, i) => vectorizador.vocabulario.set(token, i));
+    vectorizador.idf = base64AFloat(guardados.idf);
+    vectorizador.totalDocs = guardados.totalDocs;
+    clasificador.clases = guardados.clases;
+    clasificador.pesos = guardados.pesos.map(base64AFloat);
+    clasificador.sesgos = base64AFloat(guardados.sesgos);
+  } else {
+    vectorizador.fit(textos);
+    const muestras = textos.map(t => vectorizador.transform(t));
+    clasificador.fit(muestras, etiquetas, vectorizador.vocabulario.size, clasesUnicas);
+  }
 
   return {
     vectorizador,
     clasificador,
     catalogoIntenciones,
-    frasesReferencia
+    frasesReferencia,
+    palabrasVacias: new Set(opciones?.palabrasVacias || PALABRAS_VACIAS_DEFAULT),
+    unigramasLargos: Array.from(vectorizador.vocabulario.keys()).filter(t => !t.includes(' ') && t.length >= 5),
+    tieneFueraDominio: ejemplosFueraDominio.length > 0,
+    huella
   };
+}
+
+/**
+ * 📏 Cobertura de vocabulario:
+ * Cuenta cuántas palabras con contenido del mensaje conoce el modelo.
+ * En modo tolerante también acepta palabras parecidas, para no castigar errores ortográficos.
+ */
+function medirCobertura(
+  texto: string,
+  pipeline: PipelineEntrenado,
+  tolerante: boolean = false
+): { conocidas: number; total: number } {
+  const palabras = texto
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .match(/[a-z0-9]+/g) || [];
+  const contenido = palabras.filter(p => !pipeline.palabrasVacias.has(p));
+  const parecidas: Map<string, boolean> = new Map();
+
+  let conocidas = 0;
+  for (const palabra of contenido) {
+    if (pipeline.vectorizador.vocabulario.has(palabra)) {
+      conocidas++;
+    } else if (tolerante && palabra.length >= 5) {
+      let parecida = parecidas.get(palabra);
+      if (parecida === undefined) {
+        parecida = pipeline.unigramasLargos.some(u => fuzzRatio(palabra, u) >= 82);
+        parecidas.set(palabra, parecida);
+      }
+      if (parecida) conocidas++;
+    }
+  }
+  return { conocidas, total: contenido.length };
+}
+
+function superaCobertura(cobertura: { conocidas: number; total: number }, minima: number): boolean {
+  return minima <= 0 || cobertura.total === 0 || cobertura.conocidas / cobertura.total >= minima;
 }
 
 /**
@@ -438,7 +562,8 @@ export function clasificarTexto(
   mensajeUsuario: string,
   pipeline: PipelineEntrenado,
   umbralMl: number = 0.48,
-  umbralFuzzy: number = 78
+  umbralFuzzy: number = 78,
+  coberturaMinima: number = 0
 ): { intencion: string | null; confianza: number; metodo: 'ml' | 'ml-ngram' | 'fuzzy' | 'ninguno' } {
   if (!mensajeUsuario || !mensajeUsuario.trim()) {
     return { intencion: null, confianza: 0, metodo: 'ninguno' };
@@ -450,7 +575,7 @@ export function clasificarTexto(
   // Fase 1: Inferencia directa ML completa
   try {
     const v = vectorizador.transform(textoLimpio);
-    if (v.nnz > 0 && clasificador.clases.length > 0) {
+    if (v.nnz > 0 && clasificador.clases.length > 0 && superaCobertura(medirCobertura(textoLimpio, pipeline), coberturaMinima)) {
       const probabilidades = clasificador.predictProba(v.indices, v.valores);
       let maxIdx = 0;
       let maxProb = 0;
@@ -469,6 +594,11 @@ export function clasificarTexto(
       if (mejorClase !== '__desconocido__' && maxProb >= umbralDinamico) {
         return { intencion: mejorClase, confianza: maxProb, metodo: 'ml' };
       }
+
+      // Se parece más a un ejemplo negativo que a cualquier intención
+      if (pipeline.tieneFueraDominio && mejorClase === '__desconocido__' && maxProb >= umbralDinamico) {
+        return { intencion: null, confianza: 0, metodo: 'ninguno' };
+      }
     }
   } catch {
     // Continuar a sub-ventanas
@@ -485,6 +615,12 @@ export function clasificarTexto(
         const subFragmento = palabras.slice(i, j).join(' ');
         const vSub = vectorizador.transform(subFragmento);
         if (vSub.nnz === 0) continue;
+
+        // Una sola palabra conocida dentro de un párrafo no basta para decidir la intención
+        if (coberturaMinima > 0) {
+          const cSub = medirCobertura(subFragmento, pipeline);
+          if (cSub.conocidas < 2 || cSub.conocidas / cSub.total < coberturaMinima) continue;
+        }
 
         const probs = clasificador.predictProba(vSub.indices, vSub.valores);
         let localMax = 0;
@@ -509,6 +645,10 @@ export function clasificarTexto(
   }
 
   // Fase 2: Respaldo Fuzzy con Levenshtein y sub-tokens
+  if (!superaCobertura(medirCobertura(textoLimpio, pipeline, true), coberturaMinima)) {
+    return { intencion: null, confianza: 0, metodo: 'ninguno' };
+  }
+
   let maxSimilitud = 0;
   let mejorMatch: string | null = null;
   const msgClean = textoLimpio.toLowerCase();
@@ -549,7 +689,8 @@ export function clasificarTexto(
       for (const tMsg of tokensMsg) {
         if (tMsg.length >= 5) {
           for (const tRef of tokensRef) {
-            if (tRef.length >= 5) {
+            // Una palabra idéntica no es un error tipográfico: no debe valer 100% por sí sola
+            if (tRef.length >= 5 && tMsg !== tRef) {
               const tokSim = fuzzRatio(tMsg, tRef);
               if (tokSim > similitud) {
                 similitud = tokSim;

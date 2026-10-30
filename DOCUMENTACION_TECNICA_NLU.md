@@ -46,7 +46,7 @@ El motor **IaConia** es una implementación especializada de **Procesamiento de 
 A diferencia de las arquitecturas contemporáneas basadas en Modelos de Lenguaje Masivos (LLMs generativos como GPT-4, LLaMA o Claude) que operan como cajas negras estocásticas a través de APIs HTTP en la nube, IaConia resuelve el problema del lenguaje conversacional mediante un **enfoque determinista, híbrido (Machine Learning Lineal + Heurísticas Simbólicas) y de ultrabaja latencia**:
 
 1. **Cero Dependencia de Red y Hardware Acelerado:** No requiere GPU, ni WebGPU, ni llamadas remotas; corre en cualquier runtime de JavaScript (V8, JavaScriptCore, Hermes, Bun, Node.js) o Python con cero dependencias externas de compilación C++.
-2. **Latencia Sub-milisegundo:** El tiempo promedio de inferencia, extracción de entidades y síntesis de respuesta oscila entre **0.18 ms y 1.4 ms** en CPU monohilo.
+2. **Baja Latencia en Turnos Cortos:** El tiempo promedio de inferencia, extracción de entidades y síntesis de respuesta suele quedar por debajo de **2 ms** en turnos cortos, en CPU monohilo. Los textos largos pueden tardar mucho más.
 3. **Determinismo y Gobernabilidad:** El comportamiento no "alucina". Una entrada idéntica bajo el mismo estado conversacional produce exactamente el mismo resultado predecible.
 4. **Huella de Memoria Ultraligera:** El binario empaquetado ocupa menos de **45 KB**, y un modelo con 50 intenciones y 500 frases consume menos de **1.8 MB de memoria RAM**.
 
@@ -176,7 +176,7 @@ Donde:
 
 ## 4. Algoritmo de Inferencia Jerárquica en 3 Fases
 
-Cuando el usuario envía una frase, el clasificador ejecuta un pipeline jerárquico de decisión diseñado para optimizar tanto la precisión como el costo computacional:
+Cuando el usuario envía una frase, el clasificador ejecuta un pipeline jerárquico de decisión diseñado para optimizar tanto la precisión como el costo computacional. Cada fase exige además una cobertura mínima de vocabulario (`coberturaMinima`, por defecto `0.34`): las ventanas necesitan al menos 2 palabras conocidas y la fase difusa acepta palabras parecidas. Los `ejemplosFueraDominio` entrenan una clase de rechazo, pero las negaciones no se detectan solas: hay que incluirlas ahí.
 
 ```mermaid
 flowchart TD
@@ -228,7 +228,7 @@ $$\mathcal{J}(\mathbf{W}, \mathbf{b}) = -\frac{1}{N} \sum_{i=1}^N \ln P(y^{(i)} 
 * Tasa de aprendizaje ($\eta$): $0.25$
 * Épocas de entrenamiento: $250$
 * Parámetro de penalización Ridge ($\lambda$): $0.0005$
-* Tiempo total de entrenamiento en JS: **$3 \text{ ms} - 12 \text{ ms}$**.
+* Tiempo de entrenamiento en JS: depende del modelo; ver [Perfiles de Rendimiento](#perfiles-de-rendimiento-y-consumo-de-memoria).
 
 #### Umbral de Decisión Dinámico
 En lugar de un umbral fijo estático que falla cuando se agregan decenas de intenciones, el umbral de aceptación se recalibra dinámicamente según la cardinalidad del espacio de hipótesis:
@@ -361,6 +361,8 @@ $$\text{ScoreFinal}(q, d_i) = \min\left(1.0, \; \cos(\mathbf{q}, \mathbf{d}_i) +
 
 ### Fallback de Cobertura de Tokens para Vocabulario Fuera de Distribución (OOV)
 
+> **Limitación actual:** `esTokenCompatible` compara cada palabra con el documento completo, no con sus palabras. En la práctica, las palabras con errores o en plural suelen no encontrar resultados, salvo en documentos muy cortos.
+
 Si el término de búsqueda no contiene palabras presentes en el vocabulario TF-IDF indexado ($\text{nnz} = 0$), el índice no falla en blanco. Activa automáticamente un **algoritmo de cobertura difusa por tokens**:
 
 $$\text{ScoreOOV}(q, d_i) = \frac{1}{|T_q|} \sum_{t \in T_q} \mathbb{I}(t \in \text{doc}_i \lor \text{esTokenCompatible}(t, \text{doc}_i))$$
@@ -442,13 +444,17 @@ Las respuestas admiten dos niveles de interpolación dinámica:
 
 ### Perfiles de Rendimiento y Consumo de Memoria
 
-Pruebas ejecutadas en hardware estándar de consumo (Intel Core i7 12th Gen / Apple M2, runtime Node.js v20 / V8):
+Mediciones de una sola corrida con modelos sintéticos (frases de 6 palabras), en 13th Gen Intel(R) Core(TM) i7-1355U y Node.js v22. Son orientativas: repítelas con tus datos y en el equipo donde correrá el motor.
 
-* **Tiempo de Carga y Entrenamiento Inicial (50 intenciones, 600 frases):** `6.8 ms`
-* **Latencia Promedio por Turno Conversacional (Inferencia + Slots):** `0.42 ms`
-* **Latencia con Búsqueda Vectorial en Base Factual (1,000 registros):** `1.15 ms`
-* **Tamaño del Modelo Exportado (`exportModel()` JSON):** `38 KB`
-* **Consumo de Memoria Heap de V8:** `~1.4 MB`
+* **Entrenamiento (50 intenciones, 600 frases):** `410 ms – 580 ms`
+* **Entrenamiento (100 intenciones, 2,000 frases):** `3.2 s – 4.1 s`
+* **Entrenamiento (200 intenciones, 6,000 frases):** `22 s – 29 s`
+* **Restauración con pesos guardados (50 intenciones, 600 frases):** `5 ms`
+* **Tamaño de `exportModel()` (50 intenciones, 600 frases):** `~27 KB` sin pesos, `~850 KB` con pesos
+* **Paquete minificado:** `31 KB` (`10 KB` con gzip)
+* **Rechazo de un texto ajeno al vocabulario (50 intenciones):** `0.5 ms` con 10 palabras y `5 ms` con 1,000 palabras
+
+Los textos largos que sí usan el vocabulario del modelo son el peor caso, porque pasan por las ventanas y el motor difuso: con 50 intenciones, `1.7 s` con 200 palabras y `7.8 s` con 1,000. Clasifica turno por turno y no llamadas completas.
 
 ---
 
@@ -457,7 +463,7 @@ Pruebas ejecutadas en hardware estándar de consumo (Intel Core i7 12th Gen / Ap
 | Dimensión Técnica | LLM Remoto (OpenAI GPT-4o / Claude) | Framework Local Clásico (Rasa NLU / Python) | **IaConia (Client-Side Edge NLU)** |
 | :--- | :--- | :--- | :--- |
 | **Lugar de Ejecución** | Nube (Servidores del proveedor) | Servidor dedicado (Python + PyTorch) | **Navegador del cliente / Node.js / App móvil** |
-| **Latencia de Respuesta** | $600 \text{ ms} - 3,500 \text{ ms}$ | $45 \text{ ms} - 180 \text{ ms}$ | **$0.2 \text{ ms} - 1.5 \text{ ms}$** |
+| **Latencia de Respuesta** | $600 \text{ ms} - 3,500 \text{ ms}$ | $45 \text{ ms} - 180 \text{ ms}$ | **Normalmente $< 2 \text{ ms}$ en turnos cortos** |
 | **Costo Operativo por Petición** | Variable por token (\$0.005 - \$0.03) | Costo de infraestructura fija (VMs, RAM) | **\$0.0000 (Ilimitado y gratuito)** |
 | **Privacidad / Cumplimiento GDPR** | Datos del usuario cruzan internet | Depende del hosting propio | **100% On-Device (los datos no salen del equipo)** |
 | **Operación Offline** | Imposible (requiere internet) | Imposible en clientes móviles sin servidor | **Completamente autónomo sin red** |
